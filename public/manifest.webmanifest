@@ -1,0 +1,26 @@
+{
+  "name": "TADE — TK Asy Syifa Tanggul",
+  "short_name": "TADE",
+  "description": "Sistem Informasi Manajemen & Ekosistem Digital TK Asy Syifa Tanggul",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#064e3b",
+  "theme_color": "#059669",
+  "icons": [
+    {
+      "src": "/assets/mascot/asy/ASY_MASTER.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/assets/mascot/asy/ASY_MASTER.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "categories": ["education", "kids", "lifestyle"]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SIM TK ASY SYIFA TANGGUL",
+  "description": "Website Resmi dan Portal Public SIM TK Asy Syifa Tanggul, Jember, Jawa Timur - Taman Kanak-Kanak Islam Moderen & Berkarakter",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

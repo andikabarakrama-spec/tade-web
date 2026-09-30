@@ -1,0 +1,162 @@
+{
+  "entities": {
+    "TADESetting": {
+      "title": "TADE Website Setting",
+      "description": "Configuration settings for TADE website themes, identity, and features",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "theme": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["theme", "updatedAt"]
+    },
+    "TADEContent": {
+      "title": "TADE Content Article/Page",
+      "description": "CMS Articles, news, and school info",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "body": { "type": "string" },
+        "category": { "type": "string" },
+        "isPublished": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "body", "category"]
+    },
+    "TADEMenu": {
+      "title": "TADE Menu Item",
+      "description": "Navigation menu item configuration",
+      "type": "object",
+      "properties": {
+        "label": { "type": "string" },
+        "path": { "type": "string" },
+        "order": { "type": "number" },
+        "enabled": { "type": "boolean" }
+      },
+      "required": ["label", "path"]
+    },
+    "TADEMedia": {
+      "title": "TADE Media Item",
+      "description": "Gallery, banners, video embeds, and document links",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "type": { "type": "string", "enum": ["gallery", "video", "banner", "document"] },
+        "isPublished": { "type": "boolean" }
+      },
+      "required": ["title", "url", "type"]
+    },
+    "PPDBRecord": {
+      "title": "PPDB Registration Record",
+      "description": "New student registration record",
+      "type": "object",
+      "properties": {
+        "registrationNo": { "type": "string" },
+        "studentName": { "type": "string" },
+        "nik": { "type": "string" },
+        "status": { "type": "string" },
+        "registeredAt": { "type": "string" }
+      },
+      "required": ["registrationNo", "studentName", "nik"]
+    },
+    "SIMPresensi": {
+      "title": "SIM Student Attendance Record",
+      "description": "Daily attendance record for students",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "date": { "type": "string" },
+        "status": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["studentId", "date", "status"]
+    },
+    "SIMErapor": {
+      "title": "SIM E-Rapor Assessment",
+      "description": "Academic and character report card records",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "semester": { "type": "string" },
+        "grades": { "type": "object" },
+        "teacherNotes": { "type": "string" }
+      },
+      "required": ["studentId", "semester"]
+    },
+    "SIMSPP": {
+      "title": "SIM Tuition Fee Record",
+      "description": "Tuition fee payment history",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "month": { "type": "string" },
+        "amount": { "type": "number" },
+        "isPaid": { "type": "boolean" }
+      },
+      "required": ["studentId", "month", "amount", "isPaid"]
+    },
+    "FCMDeviceToken": {
+      "title": "FCM Device Token Registration",
+      "description": "Registered FCM push token for authenticated user devices",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "platform": { "type": "string" },
+        "browser": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      },
+      "required": ["token", "platform", "browser", "createdAt", "updatedAt", "enabled"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/fcm_tokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/FCMDeviceToken" },
+      "description": "Registered FCM device tokens for multi-device push notifications"
+    },
+    "tade_settings": {
+      "schema": { "$ref": "#/entities/TADESetting" },
+      "description": "Public website theme and layout configurations"
+    },
+    "tade_content": {
+      "schema": { "$ref": "#/entities/TADEContent" },
+      "description": "Public website CMS articles and school information"
+    },
+    "tade_menus": {
+      "schema": { "$ref": "#/entities/TADEMenu" },
+      "description": "Dynamic menu structure configuration"
+    },
+    "tade_widgets": {
+      "schema": "object",
+      "description": "Widget configurations"
+    },
+    "tade_media": {
+      "schema": { "$ref": "#/entities/TADEMedia" },
+      "description": "School gallery photos, videos, and document attachments"
+    },
+    "tade_users": {
+      "schema": "object",
+      "description": "TADE system users"
+    },
+    "SIM_TK_ASY_SYIFA_PPDB_RECORDS": {
+      "schema": { "$ref": "#/entities/PPDBRecord" },
+      "description": "Prospective student enrollment applications"
+    },
+    "sim_presensi": {
+      "schema": { "$ref": "#/entities/SIMPresensi" },
+      "description": "Private student attendance logs"
+    },
+    "sim_erapor": {
+      "schema": { "$ref": "#/entities/SIMErapor" },
+      "description": "Private student academic and character e-rapor cards"
+    },
+    "sim_spp": {
+      "schema": { "$ref": "#/entities/SIMSPP" },
+      "description": "Private student tuition payment history"
+    }
+  }
+}

@@ -1,0 +1,513 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function hasUserDoc() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasTadeUserDoc() {
+      return isSignedIn() && exists(/databases/$(database)/documents/tade_users/$(request.auth.uid));
+    }
+
+    function getUserRole() {
+      return !isSignedIn() ? 'Guest' :
+        (request.auth.token != null && 'role' in request.auth.token && request.auth.token.role != null) ? request.auth.token.role :
+        (request.auth.token != null && 'admin' in request.auth.token && request.auth.token.admin == true) ? 'Admin SIM' :
+        hasUserDoc() && ('role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data) ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role :
+        hasTadeUserDoc() && ('role' in get(/databases/$(database)/documents/tade_users/$(request.auth.uid)).data) ? get(/databases/$(database)/documents/tade_users/$(request.auth.uid)).data.role :
+        'Guest';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token != null && 'admin' in request.auth.token && request.auth.token.admin == true) ||
+        getUserRole() in ['Super Admin', 'SUPER_ADMIN', 'Admin SIM', 'ADMIN', 'Admin', 'Ketua Yayasan', 'KETUA_YAYASAN', 'Kepala Sekolah', 'KEPALA_SEKOLAH', 'admin', 'superadmin']
+      );
+    }
+
+    function isFinanceAuthorized() {
+      return isSignedIn() && (
+        isAdmin() ||
+        getUserRole() in ['Keuangan', 'KEUANGAN', 'Bendahara', 'BENDAHARA', 'staff', 'Staff', 'STAFF']
+      );
+    }
+
+    function isStaffOrTeacher() {
+      return isSignedIn() && (
+        isAdmin() ||
+        isFinanceAuthorized() ||
+        getUserRole() in ['Guru', 'GURU', 'teacher', 'TEACHER']
+      );
+    }
+
+    function isWaliMurid() {
+      return isSignedIn() && (
+        getUserRole() in ['Wali Murid', 'WALI_MURID', 'CALON_WALI_MURID', 'parent', 'wali']
+      );
+    }
+
+    function getStudentId() {
+      return hasUserDoc() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentId != null
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentId
+        : '';
+    }
+
+    function isOwnerOrChild(res) {
+      return isSignedIn() && res != null && (
+        ('parentUid' in res.data && res.data.parentUid != null)
+          ? (res.data.parentUid == request.auth.uid || (!isWaliMurid() && ('userId' in res.data && res.data.userId == request.auth.uid)))
+          : (('userId' in res.data && res.data.userId == request.auth.uid) ||
+             ('payerId' in res.data && res.data.payerId == request.auth.uid) ||
+             ('waliUid' in res.data && res.data.waliUid == request.auth.uid) ||
+             ('waliMuridUid' in res.data && res.data.waliMuridUid == request.auth.uid))
+      );
+    }
+
+    // School Profile & System Settings (CMS Admin Controlled)
+    match /tade_settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /school_profile/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // User Profile Management
+    match /users/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow create: if isOwner(userId) && (
+        !('role' in request.resource.data) ||
+        request.resource.data.role in ['CALON_WALI_MURID', 'Wali Murid', 'Guest', 'GUEST'] ||
+        isAdmin()
+      );
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        request.resource.data.role == resource.data.role &&
+        (
+          !('status' in resource.data) ||
+          request.resource.data.status == resource.data.status
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /tade_users/{userId} {
+      allow read: if isAdmin() || isOwner(userId);
+      allow create: if isOwner(userId) && (
+        !('role' in request.resource.data) ||
+        request.resource.data.role in ['CALON_WALI_MURID', 'Wali Murid', 'Guest', 'GUEST'] ||
+        isAdmin()
+      );
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        request.resource.data.role == resource.data.role
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Approval Engine Requests
+    match /approval_requests/{reqId} {
+      allow read: if isAdmin() || (
+        isSignedIn() && resource != null && resource.data.requesterId == request.auth.uid
+      );
+      allow create: if isAdmin() || (
+        isSignedIn() && request.resource.data.requesterId == request.auth.uid
+      );
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource != null &&
+        resource.data.requesterId == request.auth.uid &&
+        (resource.data.status == 'pending' || resource.data.status == 'PENDING') &&
+        request.resource.data.status == 'cancelled' &&
+        request.resource.data.requesterId == resource.data.requesterId &&
+        request.resource.data.targetId == resource.data.targetId &&
+        request.resource.data.type == resource.data.type
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Immutable Audit Trail (Validated actorUid, append-only, admin view)
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && (
+        !('actorUid' in request.resource.data) ||
+        request.resource.data.actorUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow update, delete: if false; // Logs cannot be modified or deleted
+    }
+
+    // Public website data (Public READ, Admin CMS WRITE)
+    match /website_homepage/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_news/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_events/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_gallery/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_teachers_public/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_announcements/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_faq/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_programs/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_achievements/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_quotes/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_production_lock/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /website_ppdb/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /tade_content/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /tade_menus/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /tade_widgets/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /tade_media/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // PPDB Records (create allowed for prospective parents, read/write for admins & owners)
+    match /SIM_TK_ASY_SYIFA_PPDB_RECORDS/{recId} {
+      allow create: if true;
+      allow read: if isAdmin() || (isSignedIn() && (resource == null || resource.data.email == request.auth.email || resource.data.userId == request.auth.uid));
+      allow update, delete: if isAdmin();
+    }
+
+    // Student Master Data Collection (Strict Ownership & Staff Access)
+    match /students/{studentId} {
+      allow read: if isStaffOrTeacher() || isOwnerOrChild(resource);
+      allow write: if isStaffOrTeacher();
+    }
+
+    // Private SIM Data (Presensi, Erapor, SPP) - Strictly Authorized
+    match /sim_presensi/{presensiId} {
+      allow read: if isStaffOrTeacher() || isOwnerOrChild(resource);
+      allow write: if isStaffOrTeacher();
+    }
+
+    match /sim_erapor/{eraporId} {
+      allow read: if isStaffOrTeacher() || isOwnerOrChild(resource);
+      allow write: if isStaffOrTeacher();
+    }
+
+    match /sim_spp/{sppId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || isOwnerOrChild(resource);
+      allow write: if isFinanceAuthorized();
+    }
+
+    // Notification Center Engine
+    match /notifications/{notifId} {
+      allow read: if isSignedIn();
+      allow create, update: if isStaffOrTeacher();
+      allow delete: if isAdmin();
+    }
+
+    match /notification_events/{eventId} {
+      allow read: if isSignedIn();
+      allow write: if isStaffOrTeacher();
+    }
+
+    // Smart Archive Production Engine
+    match /digital_archives/{archiveId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isStaffOrTeacher();
+    }
+
+    match /archive_versions/{versionId} {
+      allow read: if isSignedIn();
+      allow write: if isStaffOrTeacher();
+    }
+
+    match /archive_audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && (
+        !('actorUid' in request.resource.data) ||
+        request.resource.data.actorUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow update, delete: if false; // Immutable audit logs
+    }
+
+    // Smart Document Factory Engine
+    match /document_templates/{templateId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /documents/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isStaffOrTeacher();
+    }
+
+    match /document_sequences/{seqId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // AI Search & Knowledge Engine
+    match /knowledge_index/{indexId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /health_reports/{reportId} {
+      allow read: if isStaffOrTeacher() || isOwnerOrChild(resource);
+      allow write: if isStaffOrTeacher();
+    }
+
+    // TADE Backup & Recovery Center (Strict Admin Only)
+    match /system_backups/{backupId} {
+      allow read, write: if isAdmin();
+    }
+
+    // TADE Payment Engine Foundation
+    match /payments/{paymentId} {
+      allow get: if isAdmin() || isFinanceAuthorized() || isOwnerOrChild(resource);
+      allow list: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.payerId == request.auth.uid ||
+          resource.data.userId == request.auth.uid ||
+          resource.data.parentUid == request.auth.uid
+        )
+      );
+      allow create: if isSignedIn() && (
+        isAdmin() || isFinanceAuthorized() || (
+          request.resource.data.payerId == request.auth.uid &&
+          request.resource.data.paymentStatus == 'PENDING'
+        )
+      );
+      allow update: if isFinanceAuthorized();
+      allow delete: if isAdmin();
+    }
+
+    // Transaction Locks Engine (Atomicity & Idempotency)
+    match /transaction_locks/{lockId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        request.resource.data.lockedBy == request.auth.uid ||
+        isAdmin() || isStaffOrTeacher()
+      );
+      allow update: if (isAdmin() || isStaffOrTeacher()) || (
+        isSignedIn() &&
+        resource.data.lockedBy == request.auth.uid &&
+        request.resource.data.lockedBy == request.auth.uid
+      );
+      allow delete: if (isAdmin() || isStaffOrTeacher()) || (
+        isSignedIn() &&
+        resource.data.lockedBy == request.auth.uid
+      );
+    }
+
+    match /idempotency_keys/{keyId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        request.resource.data.userUid == request.auth.uid ||
+        isAdmin() || isStaffOrTeacher()
+      );
+      allow update: if (isAdmin() || isStaffOrTeacher()) || (
+        isSignedIn() &&
+        resource.data.userUid == request.auth.uid &&
+        request.resource.data.userUid == request.auth.uid
+      );
+      allow delete: if isAdmin() || isStaffOrTeacher();
+    }
+
+    // Document Type Manager Engine
+    match /tade_document_types/{typeId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Document Vault Engine
+    match /tade_document_vault/{docId} {
+      allow read: if isStaffOrTeacher() || (isSignedIn() && (resource == null || resource.data.ownerId == request.auth.uid || resource.data.createdBy == request.auth.uid || isOwnerOrChild(resource)));
+      allow create: if isSignedIn() && (
+        request.resource.data.ownerId == request.auth.uid ||
+        request.resource.data.createdBy == request.auth.uid ||
+        isAdmin()
+      );
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.ownerId == request.auth.uid &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.visibility == resource.data.visibility &&
+        request.resource.data.status in ['SUBMITTED', 'PENDING', 'NEEDS_REVISION']
+      );
+      allow delete: if isAdmin();
+    }
+
+    // FIND-04 Unified Financial Ecosystem Security Rules
+    match /financial_accounts/{accountId} {
+      allow read: if isAdmin() || isFinanceAuthorized();
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /financial_ledger/{ledgerId} {
+      allow read: if isAdmin() || isFinanceAuthorized();
+      allow create: if isAdmin() || isFinanceAuthorized();
+      allow update, delete: if false; // Immutable double-entry ledger entries
+    }
+
+    match /unified_financial_transactions/{txId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.studentId == request.auth.uid ||
+          resource.data.payerId == request.auth.uid ||
+          resource.data.employeeId == request.auth.uid ||
+          isOwnerOrChild(resource)
+        )
+      );
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /savings_accounts/{savingsId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.studentId == request.auth.uid ||
+          resource.data.parentUid == request.auth.uid ||
+          isOwnerOrChild(resource)
+        )
+      );
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /savings_transactions/{txId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.parentUid == request.auth.uid ||
+          resource.data.studentId == request.auth.uid ||
+          isOwnerOrChild(resource)
+        )
+      );
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /savings_withdrawals/{reqId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.parentUid == request.auth.uid ||
+          resource.data.requestedBy == request.auth.uid
+        )
+      );
+      allow create: if isSignedIn() && (
+        isAdmin() || isFinanceAuthorized() ||
+        request.resource.data.requestedBy == request.auth.uid
+      );
+      allow update: if isAdmin() || isFinanceAuthorized();
+      allow delete: if isAdmin();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isAdmin() || isFinanceAuthorized();
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /employee_payment_profiles/{profileId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          resource.data.userId == request.auth.uid ||
+          profileId == request.auth.uid
+        )
+      );
+      allow write: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && (
+          request.resource.data.userId == request.auth.uid ||
+          profileId == request.auth.uid
+        )
+      );
+    }
+
+    match /payroll_records/{payrollId} {
+      allow read: if isAdmin() || isFinanceAuthorized() || (
+        isSignedIn() && resource.data.userId == request.auth.uid
+      );
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    match /financial_closings/{closingId} {
+      allow read: if isAdmin() || isFinanceAuthorized();
+      allow write: if isAdmin();
+    }
+
+    match /financial_reconciliations/{reconcilId} {
+      allow read: if isAdmin() || isFinanceAuthorized();
+      allow write: if isAdmin() || isFinanceAuthorized();
+    }
+
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+

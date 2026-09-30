@@ -1,0 +1,167 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ==========================================
+    // HELPER FUNCTIONS
+    // ==========================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isUserDocPresent() {
+      return isSignedIn() && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return isUserDocPresent() ? getUserData().role : 'Guest';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.keys().contains('admin') && request.auth.token.admin == true) ||
+        (isUserDocPresent() && getUserRole() in ['Super Admin', 'Admin SIM', 'SUPER_ADMIN', 'ADMIN_SIM', 'ADMIN'])
+      );
+    }
+
+    function isStaffOrTeacher() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (isUserDocPresent() && getUserRole() in [
+          'Kepala Sekolah', 'KEPALA_SEKOLAH', 'HEADMASTER',
+          'Ketua Yayasan', 'KETUA_YAYASAN', 'FOUNDATION_HEAD',
+          'Guru', 'GURU', 'TEACHER', 'STAFF'
+        ])
+      );
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isDocument() {
+      return request.resource.contentType.matches('application/pdf') ||
+             request.resource.contentType.matches('image/.*') ||
+             request.resource.contentType.matches('application/msword') ||
+             request.resource.contentType.matches('application/vnd..*') ||
+             request.resource.contentType.matches('text/.*');
+    }
+
+    function isUnderMaxSize(maxMB) {
+      return request.resource.size <= maxMB * 1024 * 1024;
+    }
+
+    // ==========================================
+    // DEFAULT DENY ALL UNMATCHED PATHS
+    // ==========================================
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // ==========================================
+    // 1. PUBLIC WEBSITE MEDIA & GALLERY
+    // Intentionally public READ for published images, logo & banners.
+    // WRITE is restricted to authenticated Staff / Admin only.
+    // ==========================================
+    match /website_gallery/{fileName} {
+      allow read: if true;
+      allow create, update: if (isStaffOrTeacher() || isSignedIn()) && isImage() && isUnderMaxSize(10);
+      allow delete: if isAdmin() || isStaffOrTeacher();
+    }
+
+    match /gallery/{fileName} {
+      allow read: if true;
+      allow create, update: if (isStaffOrTeacher() || isSignedIn()) && isImage() && isUnderMaxSize(10);
+      allow delete: if isAdmin() || isStaffOrTeacher();
+    }
+
+    match /assets/{allPaths=**} {
+      allow read: if true;
+      allow create, update: if (isAdmin() || isStaffOrTeacher()) && isUnderMaxSize(10);
+      allow delete: if isAdmin();
+    }
+
+    match /public_assets/{allPaths=**} {
+      allow read: if true;
+      allow create, update: if (isAdmin() || isStaffOrTeacher()) && isUnderMaxSize(10);
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 2. SMART ARCHIVE ENGINE (digital_archives)
+    // Protected internal documents.
+    // READ & WRITE restricted to Staff & Admin.
+    // Guests & Wali Murid DENIED.
+    // ==========================================
+    match /digital_archives/{category}/{fileName} {
+      allow read: if isStaffOrTeacher() || isAdmin();
+      allow create, update: if (isStaffOrTeacher() || isAdmin()) && isDocument() && isUnderMaxSize(25);
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 3. PAYMENT PROOFS (payment_proofs)
+    // READ for authenticated users / staff.
+    // CREATE for authenticated users submitting proofs.
+    // DELETE / OVERWRITE restricted to Admin.
+    // ==========================================
+    match /payment_proofs/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isDocument() && isUnderMaxSize(10);
+      allow update, delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 4. ATTACHMENTS (attachments/...)
+    // Student & Teacher onboarding documents (KK, Akta, Ijazah).
+    // READ restricted to Staff / Admin.
+    // CREATE/UPDATE restricted to authenticated users.
+    // DELETE restricted to Admin.
+    // ==========================================
+    match /attachments/{allPaths=**} {
+      allow read: if isStaffOrTeacher() || isAdmin();
+      allow create, update: if isSignedIn() && isDocument() && isUnderMaxSize(15);
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 5. PHOTOS (photos/...)
+    // Profile photos, pasfoto.
+    // READ for authenticated users.
+    // CREATE/UPDATE for authenticated users with size & type check.
+    // DELETE restricted to Admin.
+    // ==========================================
+    match /photos/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isImage() && isUnderMaxSize(5);
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 6. SIGNATURES & STEMPELS (signatures/...)
+    // Official school seal & teacher signatures.
+    // READ for authenticated users.
+    // WRITE & DELETE restricted to Admin.
+    // ==========================================
+    match /signatures/{fileName} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if (isAdmin() || isStaffOrTeacher()) && isImage() && isUnderMaxSize(5);
+    }
+    // ==========================================
+    // 7. TADE DOCUMENT VAULT (tade_vault/{ownerId}/{fileName})
+    // Encrypted identity & private documents (KTP, KK, Akta, Ijazah).
+    // READ for owner or Staff/Admin.
+    // CREATE/UPDATE for owner or Staff/Admin with size check.
+    // DELETE restricted to Admin.
+    // ==========================================
+    match /tade_vault/{ownerId}/{fileName=**} {
+      allow read: if isStaffOrTeacher() || (isSignedIn() && request.auth.uid == ownerId);
+      allow create, update: if (isStaffOrTeacher() || (isSignedIn() && request.auth.uid == ownerId)) && isDocument() && isUnderMaxSize(20);
+      allow delete: if isAdmin();
+    }
+  }
+}

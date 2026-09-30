@@ -1,0 +1,169 @@
+@import "tailwindcss";
+
+@layer utilities {
+  /* Living Garden Animations */
+  @keyframes floatSlow {
+    0%, 100% { transform: translateY(0px) rotate(0deg); }
+    50% { transform: translateY(-10px) rotate(3deg); }
+  }
+
+  @keyframes flutterWing {
+    0%, 100% { transform: scaleX(1) rotate(0deg); }
+    50% { transform: scaleX(0.2) rotate(10deg); }
+  }
+
+  @keyframes swayGentle {
+    0%, 100% { transform: rotate(-4deg); }
+    50% { transform: rotate(4deg); }
+  }
+
+  @keyframes cloudDrift {
+    0% { transform: translateX(-10%); }
+    100% { transform: translateX(110vw); }
+  }
+
+  @keyframes driveVehicle {
+    0% { transform: translateX(-120px); }
+    100% { transform: translateX(calc(100vw + 120px)); }
+  }
+
+  @keyframes twinkleStar {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+  }
+
+  @keyframes glowFirefly {
+    0%, 100% { opacity: 0.2; transform: translateY(0px) scale(0.8); }
+    50% { opacity: 0.9; transform: translateY(-15px) scale(1.2); }
+  }
+
+  @keyframes bubbleFloat {
+    0% { transform: translateY(0) scale(1); opacity: 0.8; }
+    80% { opacity: 0.8; }
+    100% { transform: translateY(-180px) scale(1.1); opacity: 0; }
+  }
+
+  @keyframes popBubble {
+    0% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.4); opacity: 0.5; }
+    100% { transform: scale(0); opacity: 0; }
+  }
+
+  @keyframes hopAnimal {
+    0%, 100% { transform: translateY(0) scaleX(1); }
+    50% { transform: translateY(-12px) scaleX(1.05); }
+  }
+
+  .animate-float-slow {
+    animation: floatSlow 4s ease-in-out infinite;
+  }
+
+  .animate-flutter {
+    animation: flutterWing 0.25s ease-in-out infinite alternate;
+  }
+
+  .animate-sway {
+    animation: swayGentle 3s ease-in-out infinite;
+  }
+
+  .animate-cloud-drift {
+    animation: cloudDrift 60s linear infinite;
+  }
+
+  .animate-twinkle {
+    animation: twinkleStar 2s ease-in-out infinite;
+  }
+
+  .animate-firefly {
+    animation: glowFirefly 3s ease-in-out infinite;
+  }
+
+  .animate-hop {
+    animation: hopAnimal 1.8s ease-in-out infinite;
+  }
+
+  .animate-vehicle {
+    animation: driveVehicle 25s linear infinite;
+  }
+
+  /* ============================================================
+     TADE SPRINT G20: ASY SYIFA OFFICIAL ANIMATION & MOTION DNA
+     ============================================================ */
+  @keyframes dnaLangkahKecil {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    25% { transform: translateY(-4px) rotate(-3deg); }
+    75% { transform: translateY(-4px) rotate(3deg); }
+  }
+
+  @keyframes dnaLambaianTangan {
+    0%, 100% { transform: rotate(0deg); }
+    25% { transform: rotate(-8deg); }
+    75% { transform: rotate(8deg); }
+  }
+
+  @keyframes dnaLoncatGembira {
+    0%, 100% { transform: translateY(0) scale(1, 1); }
+    30% { transform: translateY(-16px) scale(0.95, 1.05); }
+    70% { transform: translateY(-8px) scale(1.02, 0.98); }
+    85% { transform: translateY(0) scale(1.04, 0.96); }
+  }
+
+  @keyframes dnaTepukTangan {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.08); }
+  }
+
+  @keyframes dnaAnggukanKepala {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    50% { transform: translateY(6px) rotate(2deg); }
+  }
+
+  @keyframes dnaPutaranKecil {
+    0% { transform: rotate(0deg) scale(1); }
+    50% { transform: rotate(180deg) scale(1.08); }
+    100% { transform: rotate(360deg) scale(1); }
+  }
+
+  @keyframes dnaBreathing {
+    0%, 100% { transform: scale(1, 1); }
+    50% { transform: scale(1.02, 1.03); }
+  }
+
+  @keyframes dnaRainbowFadeIn {
+    0% { opacity: 0; transform: scale(0.92) translateY(-10px); }
+    100% { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  .animate-dna-langkah-kecil {
+    animation: dnaLangkahKecil 1.2s ease-in-out infinite;
+  }
+
+  .animate-dna-lambaian-tangan {
+    animation: dnaLambaianTangan 1.4s ease-in-out infinite;
+  }
+
+  .animate-dna-loncat-gembira {
+    animation: dnaLoncatGembira 1s ease-in-out infinite;
+  }
+
+  .animate-dna-tepuk-tangan {
+    animation: dnaTepukTangan 0.6s ease-in-out infinite;
+  }
+
+  .animate-dna-anggukan-kepala {
+    animation: dnaAnggukanKepala 1s ease-in-out infinite;
+  }
+
+  .animate-dna-putaran-kecil {
+    animation: dnaPutaranKecil 2s ease-in-out infinite;
+  }
+
+  .animate-dna-breathing {
+    animation: dnaBreathing 2.5s ease-in-out infinite;
+  }
+
+  .animate-dna-rainbow {
+    animation: dnaRainbowFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+}
+

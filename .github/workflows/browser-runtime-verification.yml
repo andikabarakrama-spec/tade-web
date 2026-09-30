@@ -1,0 +1,51 @@
+name: TADE Browser Runtime Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  browser-runtime-test:
+    name: Playwright Chromium E2E Gate
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Start local application server
+        run: |
+          npm run dev &
+          npx wait-on http://localhost:3000 --timeout 60000
+
+      - name: Execute P1-80 R5 Browser Runtime Test
+        env:
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+          TEST_SUPER_ADMIN_EMAIL: ${{ secrets.TEST_SUPER_ADMIN_EMAIL }}
+          TEST_SUPER_ADMIN_PASSWORD: ${{ secrets.TEST_SUPER_ADMIN_PASSWORD }}
+        run: node tests/browser/r5-browser-test.mjs
+
+      - name: Upload Test Artifacts & Screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-browser-artifacts
+          path: tests/browser/*.png
+          retention-days: 7
