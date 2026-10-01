@@ -342,9 +342,13 @@ test.describe('TADE P1-80 — Actual Browser Runtime Verification', () => {
     );
 
     const content = await page.content();
+    const bodyText = await page.evaluate(() => document.body.innerText);
+
     // Fail closed: no assigned class means access denied or empty scoped state
     const isProtected = content.includes('r5-access-denied-container') || !content.includes('Daftar Seluruh Siswa');
     expect(isProtected).toBe(true);
+    expect(content).not.toContain('Pilih Guru Wali Kelas Baru');
+    expect(bodyText).not.toContain('Kontak Wali: 08');
     expect(pageErrors).toEqual([]);
 
     await page.screenshot({
@@ -379,6 +383,8 @@ test.describe('TADE P1-80 — Actual Browser Runtime Verification', () => {
     expect(content.includes('r5-access-denied-container') || bodyText.includes('Akses Data Kelompok Belajar Dibatasi')).toBe(true);
     expect(content).not.toContain('id="r5-rombel-container"');
     expect(bodyText).not.toContain('Daftar Seluruh Siswa');
+    expect(bodyText).not.toContain('Kontak Wali: 08');
+    expect(content).not.toContain('parentPhone');
     expect(pageErrors).toEqual([]);
 
     await page.screenshot({
@@ -402,5 +408,63 @@ test.describe('TADE P1-80 — Actual Browser Runtime Verification', () => {
       return;
     }
     expect(true).toBe(true);
+  });
+
+  test('TC-12: P1-83 — R19 Unauthenticated & Unauthorized Security Gate Verification', async ({ page }) => {
+    const pageErrors: string[] = [];
+
+    page.on('pageerror', (err) => {
+      pageErrors.push(err.message);
+    });
+
+    await page.addInitScript(() => {
+      sessionStorage.setItem('tade_splash_shown_v971', 'true');
+      sessionStorage.setItem('tade_opening_seen', 'true');
+      sessionStorage.setItem('tade_sim_tab', 'r19');
+      localStorage.setItem('tade_sim_tab', 'r19');
+    });
+
+    const response = await page.goto('http://127.0.0.1:3000/sim?tab=r19', {
+      waitUntil: 'domcontentloaded',
+      timeout: 25000,
+    });
+
+    expect(response?.status()).toBe(200);
+
+    // Wait for auth resolution
+    await page.waitForFunction(
+      () => !document.body.innerText.includes('Memuat Sistem Informasi...'),
+      { timeout: 20000 }
+    ).catch(() => {});
+
+    const content = await page.content();
+    const bodyText = await page.evaluate(() => document.body.innerText);
+
+    // 1. Assert fail-closed gate is active
+    expect(
+      content.includes('id="r19-access-denied-container"') ||
+      bodyText.includes('Akses Terbatas — Otorisasi Diperlukan') ||
+      bodyText.includes('Portal SIM Asy-Syifa')
+    ).toBe(true);
+
+    // 2. Assert collection grid and table are ABSENT
+    expect(content).not.toContain('id="r19-collection-grid"');
+    expect(content).not.toContain('id="r19-collection-table"');
+
+    // 3. Assert operational mutation form is ABSENT
+    expect(content).not.toContain('id="r19-modal-form"');
+
+    // 4. Assert zero student PII in DOM
+    expect(bodyText).not.toContain('NISN');
+    expect(bodyText).not.toContain('NIK Siswa');
+    expect(bodyText).not.toContain('Nama Lengkap & Panggilan');
+
+    // 5. Assert zero uncaught page errors
+    expect(pageErrors).toEqual([]);
+
+    await page.screenshot({
+      path: path.join(screenshotsDir, '12-r19-unauthenticated-access-denied.png'),
+      fullPage: true,
+    });
   });
 });

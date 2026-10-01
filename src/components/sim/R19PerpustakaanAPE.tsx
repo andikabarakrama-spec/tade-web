@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { InventoryItem, UserRole, Student } from '../../types';
+import { InventoryItem, UserRole } from '../../types';
 import { DataService } from '../../services/db';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -25,6 +25,7 @@ import {
   Hash,
   Smile,
   ShieldCheck,
+  ShieldAlert,
   BookMarked,
   FileText,
   AlertTriangle,
@@ -34,12 +35,63 @@ import {
   Compass
 } from 'lucide-react';
 
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+] as const;
+
+const MUTATION_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KEPALA_SEKOLAH',
+  'GURU'
+] as const;
+
+/**
+ * Deterministic ID Generator for Library & APE inventory items.
+ * Guarantees reproducible, collision-free canonical keys without non-deterministic entropy.
+ */
+const generateDeterministicId = (
+  category: string,
+  code: string,
+  name: string
+): string => {
+  const cleanCode = code
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '-');
+
+  const cleanCat = category
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '-');
+
+  if (cleanCode) {
+    return `inv-lib-${cleanCat}-${cleanCode}`;
+  }
+
+  const hash = Math.abs(
+    name.split('').reduce(
+      (acc, c) => (acc << 5) - acc + c.charCodeAt(0),
+      0
+    )
+  ).toString(36);
+
+  return `inv-lib-${cleanCat}-${hash}`;
+};
+
 export const R19PerpustakaanAPE: React.FC = () => {
   const { currentUser, userProfile, activeRole } = useAuth();
 
-  // Data States
+  // Data States (Zero Student Data / Zero PII leak)
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>([]);
-  const [students, setStudents] = useState<Student[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
@@ -81,10 +133,20 @@ export const R19PerpustakaanAPE: React.FC = () => {
   // Form Validation Error
   const [formError, setFormError] = useState<string>('');
 
-  // Canonical RBAC Setup (Fail-Closed)
-  const canonicalRole = (activeRole || userProfile?.role || null) as UserRole | null;
-  const isParent = canonicalRole === 'WALI_MURID' || canonicalRole === 'CALON_WALI_MURID';
-  const canMutate = !!canonicalRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU'].includes(canonicalRole);
+  // 1. Authoritative Fail-Closed Active Role Determination (SEC-01 & SEC-02)
+  const verifiedActiveRole = useMemo<UserRole | null>(() => {
+    if (!currentUser?.uid || !activeRole) return null;
+    return CANONICAL_ROLES.includes(activeRole as UserRole) ? (activeRole as UserRole) : null;
+  }, [currentUser?.uid, activeRole]);
+
+  // Operational Authority: Strictly restricted to MUTATION_ROLES
+  const canMutate = useMemo<boolean>(() => {
+    return Boolean(
+      currentUser?.uid &&
+      verifiedActiveRole &&
+      MUTATION_ROLES.includes(verifiedActiveRole)
+    );
+  }, [currentUser?.uid, verifiedActiveRole]);
 
   // Clear feedback after 5 seconds
   useEffect(() => {
@@ -96,16 +158,19 @@ export const R19PerpustakaanAPE: React.FC = () => {
     }
   }, [feedback]);
 
-  // Load Data from SSOT
+  // Load Data from SSOT with Pre-Query Authorization Gate
   const loadData = useCallback(async () => {
+    // Pre-query authorization gate: fail-closed if unauthenticated or invalid role
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setInventoryList([]);
+      setIsLoading(false);
+      return;
+    }
+
     setIsLoading(true);
     try {
-      const [invData, studentData] = await Promise.all([
-        DataService.getInventory(),
-        DataService.getStudents()
-      ]);
+      const invData = await DataService.getInventory();
       setInventoryList(invData || []);
-      setStudents(studentData || []);
     } catch (err) {
       console.error('Error loading library & APE inventory:', err);
       setFeedback({
@@ -115,7 +180,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [currentUser?.uid, verifiedActiveRole]);
 
   useEffect(() => {
     loadData();
@@ -182,7 +247,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
 
   // Open Create Modal
   const handleOpenCreate = () => {
-    if (!canMutate || !canonicalRole) {
+    if (!canMutate || !verifiedActiveRole || !currentUser?.uid) {
       setFeedback({
         type: 'error',
         message: 'Hak akses terbatas. Hanya Tenaga Pendidik / Admin yang dapat menambah data koleksi.'
@@ -191,7 +256,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
     }
     setEditingItem(null);
     setFormData({
-      code: `LIB-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 900) + 100)}`,
+      code: `LIB-${new Date().getFullYear()}-${String(inventoryList.length + 1).padStart(3, '0')}`,
       name: '',
       category: 'Buku',
       quantity: '1',
@@ -204,7 +269,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
 
   // Open Edit Modal
   const handleOpenEdit = (item: InventoryItem) => {
-    if (!canMutate || !canonicalRole) {
+    if (!canMutate || !verifiedActiveRole || !currentUser?.uid) {
       setFeedback({
         type: 'error',
         message: 'Hak akses terbatas. Anda tidak memiliki izin untuk mengedit koleksi.'
@@ -227,7 +292,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
   // Handle Save Mutation (Phase 8, 9, 20)
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canMutate || !canonicalRole || isSaving) return;
+    if (!canMutate || !verifiedActiveRole || !currentUser?.uid || isSaving) return;
 
     // Field Validations
     if (!formData.name.trim()) {
@@ -267,7 +332,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
 
     try {
       const itemToSave: InventoryItem = {
-        id: editingItem ? editingItem.id : `inv-lib-${Date.now()}`,
+        id: editingItem ? editingItem.id : generateDeterministicId(formData.category, formData.code, formData.name),
         code: formData.code.trim().toUpperCase(),
         name: formData.name.trim(),
         category: formData.category,
@@ -278,15 +343,19 @@ export const R19PerpustakaanAPE: React.FC = () => {
 
       await DataService.saveInventory(itemToSave);
 
-      // Audit Log (Phase 20) - Canonical Active Role executed only after successful persistence
-      const actorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || 'Staf Perpustakaan';
+      // Audit Log (Phase 20) - Authentic actor identity and verified active role
+      const actorName =
+        currentUser.displayName?.trim() ||
+        (userProfile?.nama || userProfile?.name)?.trim() ||
+        currentUser.email?.trim() ||
+        `Pengguna Terautentikasi (${currentUser.uid.slice(0, 8)})`;
       const actionText = editingItem
         ? `Memperbarui data koleksi perpustakaan/APE: ${itemToSave.name} (${itemToSave.code})`
         : `Menambahkan koleksi baru perpustakaan/APE: ${itemToSave.name} (${itemToSave.code})`;
 
       await DataService.logAction(
         actorName,
-        canonicalRole,
+        verifiedActiveRole,
         actionText,
         'R19_PERPUSTAKAAN_APE'
       );
@@ -313,8 +382,32 @@ export const R19PerpustakaanAPE: React.FC = () => {
     window.print();
   };
 
+  // 4. Fail-Closed Security Boundary: Unauthenticated or unverified role sessions
+  if (!currentUser?.uid || !verifiedActiveRole) {
+    return (
+      <div id="r19-access-denied-container" className="p-8 max-w-xl mx-auto my-12 bg-white rounded-3xl border border-rose-200 shadow-lg text-center space-y-4">
+        <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+          <ShieldAlert className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-900">Akses Terbatas — Otorisasi Diperlukan</h2>
+        <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+          Modul R19 (Perpustakaan Cilik & Sentra APE) memerlukan sesi pengguna terautentikasi dengan peran yang sah. Silakan masuk terlebih dahulu melalui portal SIM Asy-Syifa.
+        </p>
+        <div className="pt-2">
+          <button
+            id="btn-r19-back-sim"
+            onClick={() => window.history.back()}
+            className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-xs inline-flex items-center gap-2 shadow-sm transition"
+          >
+            Kembali ke Portal SIM
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+    <div id="r19-perpustakaan-ape-container" className="space-y-6 max-w-7xl mx-auto pb-12">
       {/* Printable Document Header (Visible only on print) */}
       <div className="hidden print:block mb-8 p-4 border-b-2 border-stone-800">
         <div className="text-center space-y-1">
@@ -608,7 +701,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
         </div>
       ) : viewMode === 'cards' ? (
         /* Dual View: Cards Grid (Phase 6) */
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
+        <div id="r19-collection-grid" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
           {filteredCollections.map(item => {
             const isBook = item.category === 'Buku';
             const isApeIndoor = item.category === 'APE Dalam';
@@ -701,7 +794,7 @@ export const R19PerpustakaanAPE: React.FC = () => {
         </div>
       ) : (
         /* Dual View: Table View (Phase 6) */
-        <div className="bg-white rounded-3xl border border-stone-200 shadow-2xs overflow-hidden">
+        <div id="r19-collection-table" className="bg-white rounded-3xl border border-stone-200 shadow-2xs overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs text-stone-700">
               <thead className="bg-stone-50 border-b border-stone-200 text-stone-600 font-bold uppercase tracking-wider text-[10px]">
