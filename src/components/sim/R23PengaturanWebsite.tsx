@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { SchoolProfile, UserRole } from '../../types';
 import { DataService } from '../../services/db';
@@ -14,7 +14,8 @@ import {
   X,
   RefreshCw,
   Building,
-  Loader2
+  Loader2,
+  ShieldAlert
 } from 'lucide-react';
 import { useLivingGarden, ThemePreset } from '../../context/LivingGardenContext';
 import { GlobalVisualAuditEngine } from './GlobalVisualAuditEngine';
@@ -22,15 +23,48 @@ import { AIWebsiteGuide } from './AIWebsiteGuide';
 import { WebsiteHealthCenter } from './WebsiteHealthCenter';
 import { AIAsyCharacterCMS } from './AIAsyCharacterCMS';
 
-export const R23PengaturanWebsite: React.FC = () => {
-  const { user, userProfile, activeRole } = useAuth();
-  const actorName = userProfile?.nama || userProfile?.name || user?.displayName || 'Admin CMS';
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+];
 
-  // Fail-closed canonical role resolution (No privileged default)
-  const canonicalRole = (activeRole || userProfile?.role || null) as UserRole | null;
-  const canManage =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
+export const R23PengaturanWebsite: React.FC = () => {
+  const { currentUser, userProfile, activeRole } = useAuth();
+
+  // Authoritative Fail-Closed Active Role Determination
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER overrides activeRole as authority source.
+  const verifiedActiveRole = useMemo<UserRole | null>(() => {
+    if (!currentUser?.uid || !activeRole) return null;
+    return CANONICAL_ROLES.includes(activeRole as UserRole) ? (activeRole as UserRole) : null;
+  }, [currentUser?.uid, activeRole]);
+
+  // Management Authority: Strictly SUPER_ADMIN, ADMIN, and KEPALA_SEKOLAH
+  const canManage = useMemo<boolean>(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(verifiedActiveRole)
+    );
+  }, [verifiedActiveRole]);
+
+  // Authentic Actor Identity Resolution (Zero synthetic fallbacks)
+  const actorDisplayName = useMemo(() => {
+    if (!currentUser?.uid) return '';
+    return (
+      currentUser.displayName?.trim() ||
+      userProfile?.nama?.trim() ||
+      userProfile?.name?.trim() ||
+      currentUser.email?.trim() ||
+      `User (${currentUser.uid.slice(0, 8)})`
+    );
+  }, [currentUser, userProfile]);
 
   const [profile, setProfile] = useState<SchoolProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -39,17 +73,57 @@ export const R23PengaturanWebsite: React.FC = () => {
 
   const { settings, updateGardenSettings, setThemePreset } = useLivingGarden();
 
+  // Pre-Query Authorization Gate with Stale Race Protection
   useEffect(() => {
-    loadProfile();
-  }, []);
+    let isCurrent = true;
 
-  const loadProfile = async () => {
+    // Hard pre-query authorization gate:
+    // If unauthenticated or role is non-canonical or unauthorized -> DENY, do NOT query Firestore
+    if (!currentUser?.uid || !verifiedActiveRole || !canManage) {
+      setProfile(null);
+      setLoading(false);
+      return () => {
+        isCurrent = false;
+      };
+    }
+
+    setLoading(true);
+    setProfile(null);
+
+    const loadProfile = async () => {
+      try {
+        const data = await DataService.getSchoolProfile();
+        if (!isCurrent) return;
+        setProfile(data);
+      } catch (err: any) {
+        if (!isCurrent) return;
+        console.error('Error loading school profile in R23:', err);
+        setFeedback({
+          type: 'error',
+          message: `Gagal memuat profil sekolah: ${err?.message || 'Terjadi gangguan jaringan Firestore.'}`
+        });
+      } finally {
+        if (isCurrent) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadProfile();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [currentUser?.uid, verifiedActiveRole, canManage]);
+
+  const handleReloadProfile = async () => {
+    if (!currentUser?.uid || !verifiedActiveRole || !canManage) return;
     setLoading(true);
     try {
       const data = await DataService.getSchoolProfile();
       setProfile(data);
     } catch (err: any) {
-      console.error('Error loading school profile in R23:', err);
+      console.error('Error reloading school profile in R23:', err);
       setFeedback({
         type: 'error',
         message: `Gagal memuat profil sekolah: ${err?.message || 'Terjadi gangguan jaringan Firestore.'}`
@@ -61,13 +135,16 @@ export const R23PengaturanWebsite: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving || !canManage || !canonicalRole) {
-      if (!canManage || !canonicalRole) {
-        setFeedback({
-          type: 'error',
-          message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengubah identitas resmi sekolah.'
-        });
-      }
+
+    // Anti double-submit guard
+    if (isSaving) return;
+
+    // Handler-level Fail-Closed Authorization Guard
+    if (!currentUser?.uid || !verifiedActiveRole || !canManage) {
+      setFeedback({
+        type: 'error',
+        message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengubah identitas resmi sekolah.'
+      });
       return;
     }
 
@@ -102,11 +179,11 @@ export const R23PengaturanWebsite: React.FC = () => {
     try {
       await DataService.updateSchoolProfile(profile);
 
-      // Audit Chain of Custody
+      // Audit Chain of Custody with Authentic Session Identity
       try {
         await DataService.logAction(
-          actorName,
-          canonicalRole,
+          actorDisplayName,
+          verifiedActiveRole,
           'R23_SCHOOL_PROFILE_UPDATE',
           `Pembaruan identitas resmi sekolah: ${profile.name} (Akreditasi: ${profile.akreditasi || '-'})`
         );
@@ -129,6 +206,35 @@ export const R23PengaturanWebsite: React.FC = () => {
     }
   };
 
+  // Fail-Closed Access Denied Boundary for Unauthenticated / Non-Canonical / Unauthorized Sessions
+  if (!currentUser?.uid || !verifiedActiveRole || !canManage) {
+    return (
+      <div id="r23-access-denied-container" className="space-y-6 font-sans">
+        <div className="bg-white rounded-3xl p-8 border border-stone-200 shadow-xs text-center space-y-4">
+          <div className="w-16 h-16 bg-rose-50 rounded-2xl flex items-center justify-center mx-auto border border-rose-200 text-rose-600">
+            <ShieldAlert className="w-8 h-8" />
+          </div>
+          <h2 className="text-xl font-black text-slate-900">Akses Ditolak: Hak Akses Tidak Mencukupi</h2>
+          <p className="text-stone-600 text-sm max-w-md mx-auto">
+            Halaman Pengaturan Identitas &amp; Website Resmi Sekolah hanya dapat diakses oleh Administrator dan Kepala Sekolah TK Islam Terpadu Asy Syifa.
+          </p>
+          <div className="inline-flex items-center gap-2 text-xs font-bold text-stone-500 bg-stone-100 px-3 py-1.5 rounded-full">
+            <Building className="w-3.5 h-3.5" /> Role Terdeteksi: {verifiedActiveRole || 'UNAUTHENTICATED / GUEST'}
+          </div>
+          <div className="pt-2">
+            <a
+              id="btn-r23-back-sim"
+              href="/sim?tab=r1"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-bold transition shadow-xs"
+            >
+              Kembali ke Dashboard Utama
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -147,7 +253,7 @@ export const R23PengaturanWebsite: React.FC = () => {
         </p>
         <button
           type="button"
-          onClick={loadProfile}
+          onClick={handleReloadProfile}
           className="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs inline-flex items-center gap-2 cursor-pointer"
         >
           <RefreshCw className="w-4 h-4" /> Coba Muat Ulang
@@ -189,7 +295,7 @@ export const R23PengaturanWebsite: React.FC = () => {
   ];
 
   return (
-    <div className="space-y-6">
+    <div id="r23-website-settings-container" className="space-y-6">
       {/* Header Banner */}
       <div className="bg-slate-900 border border-stone-800 text-white rounded-3xl p-6 sm:p-8 shadow-xl">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
@@ -202,7 +308,7 @@ export const R23PengaturanWebsite: React.FC = () => {
                 TK ASY SYIFA TANGGUL
               </span>
               <span className="text-xs font-semibold text-stone-400">
-                Operator: <strong className="text-stone-200">{actorName}</strong> ({canonicalRole || 'GUEST'})
+                Operator: <strong className="text-stone-200">{actorDisplayName}</strong> ({verifiedActiveRole || 'GUEST'})
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
@@ -216,7 +322,7 @@ export const R23PengaturanWebsite: React.FC = () => {
           <div className="flex items-center gap-3 shrink-0">
             <button
               type="button"
-              onClick={loadProfile}
+              onClick={handleReloadProfile}
               disabled={loading || isSaving}
               className="px-4 py-2.5 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold rounded-2xl border border-stone-700 text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
