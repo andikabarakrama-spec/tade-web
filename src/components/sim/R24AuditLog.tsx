@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Shield,
@@ -30,17 +30,59 @@ import { AIAsyCharacterScene } from '../assistant/AIAsyCharacterScene';
 import { SIMSkeletonLoader } from './SIMSkeletonLoader';
 import { SIMEmptyState } from './SIMEmptyState';
 
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+];
+
+const AUDIT_VIEW_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KEPALA_SEKOLAH'
+];
+
 export const R24AuditLog: React.FC = () => {
-  const { user, userProfile, activeRole } = useAuth();
+  const { currentUser, userProfile, activeRole } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
-  // Fail-closed canonical role resolution (No privileged fallback)
-  const canonicalRole = (activeRole || userProfile?.role || null) as UserRole | null;
-  const canView = !!canonicalRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
-  const canExport = !!canonicalRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
+  // 1. Authoritative Fail-Closed Active Role Determination (SEC-01 & SEC-02)
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER overrides activeRole, and no raw type-cast without array check.
+  const verifiedActiveRole = useMemo<UserRole | null>(() => {
+    if (!currentUser?.uid || !activeRole) return null;
+    return CANONICAL_ROLES.includes(activeRole as UserRole) ? (activeRole as UserRole) : null;
+  }, [currentUser?.uid, activeRole]);
+
+  // Authority boundaries
+  const canView = useMemo(() => {
+    return Boolean(verifiedActiveRole && AUDIT_VIEW_ROLES.includes(verifiedActiveRole));
+  }, [verifiedActiveRole]);
+
+  const canExport = useMemo(() => {
+    return Boolean(verifiedActiveRole && AUDIT_VIEW_ROLES.includes(verifiedActiveRole));
+  }, [verifiedActiveRole]);
+
+  // Authentic Actor Identity Resolution (Zero synthetic fallbacks, NO 'Administrator')
+  const actorDisplayName = useMemo(() => {
+    if (!currentUser?.uid) return '';
+    return (
+      currentUser.displayName?.trim() ||
+      userProfile?.nama?.trim() ||
+      userProfile?.name?.trim() ||
+      currentUser.email?.trim() ||
+      `User (${currentUser.uid.slice(0, 8)})`
+    );
+  }, [currentUser, userProfile]);
 
   // Filter States
   const [searchTerm, setSearchTerm] = useState('');
@@ -55,29 +97,108 @@ export const R24AuditLog: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(15);
 
+  // Active session and request sequence tracking to prevent stale async results
+  const isMountedRef = useRef(true);
+  const activeRequestSeqRef = useRef(0);
+  const currentSessionKey = `${currentUser?.uid || ''}:${verifiedActiveRole || ''}`;
+  const activeSessionKeyRef = useRef(currentSessionKey);
+
+  // Sync session ref and unmount lifecycle
+  useEffect(() => {
+    isMountedRef.current = true;
+    activeSessionKeyRef.current = currentSessionKey;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [currentSessionKey]);
+
+  // Pre-Query Fail-Closed Gate & Race-Condition Protected Loader
+  useEffect(() => {
+    let isCurrent = true;
+    const requestSeq = ++activeRequestSeqRef.current;
+    const reqSessionKey = currentSessionKey;
+
+    // Hard pre-query authorization gate:
+    if (!currentUser?.uid || !verifiedActiveRole || !canView) {
+      setLogs([]);
+      setLoading(false);
+      return () => {
+        isCurrent = false;
+      };
+    }
+
+    setLoading(true);
+    setLogs([]); // Immediately clear previous session logs to prevent stale flash
+
+    DataService.getAuditLogsFromFirestore()
+      .then((data) => {
+        if (!isCurrent || !isMountedRef.current || activeRequestSeqRef.current !== requestSeq || activeSessionKeyRef.current !== reqSessionKey) {
+          return;
+        }
+        setLogs(data || []);
+      })
+      .catch((e: any) => {
+        if (!isCurrent || !isMountedRef.current || activeRequestSeqRef.current !== requestSeq || activeSessionKeyRef.current !== reqSessionKey) {
+          return;
+        }
+        console.error('Error fetching audit logs:', e);
+        setFeedback({
+          type: 'error',
+          message: `Gagal memuat log audit: ${e?.message || 'Terjadi gangguan koneksi data.'}`
+        });
+        setLogs([]);
+      })
+      .finally(() => {
+        if (!isCurrent || !isMountedRef.current || activeRequestSeqRef.current !== requestSeq || activeSessionKeyRef.current !== reqSessionKey) {
+          return;
+        }
+        setLoading(false);
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [currentUser?.uid, verifiedActiveRole, canView, currentSessionKey]);
+
   const loadLogs = useCallback(async () => {
-    if (!canView) {
+    if (!currentUser?.uid || !verifiedActiveRole || !canView || isExporting) {
+      setLogs([]);
       setLoading(false);
       return;
     }
+
+    const requestSeq = ++activeRequestSeqRef.current;
+    const reqSessionKey = activeSessionKeyRef.current;
+
     setLoading(true);
     try {
       const data = await DataService.getAuditLogsFromFirestore();
-      setLogs(data);
+
+      // Guard against stale async result if session switched, activeRole changed, or component unmounted
+      if (!isMountedRef.current || activeRequestSeqRef.current !== requestSeq || activeSessionKeyRef.current !== reqSessionKey) {
+        return;
+      }
+
+      setLogs(data || []);
+      setFeedback({
+        type: 'success',
+        message: 'Data audit log berhasil diperbarui.'
+      });
     } catch (e: any) {
-      console.error('Error fetching audit logs:', e);
+      if (!isMountedRef.current || activeRequestSeqRef.current !== requestSeq || activeSessionKeyRef.current !== reqSessionKey) {
+        return;
+      }
+      console.error('Error refreshing audit logs:', e);
       setFeedback({
         type: 'error',
-        message: `Gagal memuat log audit: ${e?.message || 'Terjadi gangguan koneksi data.'}`
+        message: `Gagal memperbarui log audit: ${e?.message || 'Terjadi gangguan koneksi data.'}`
       });
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && activeRequestSeqRef.current === requestSeq && activeSessionKeyRef.current === reqSessionKey) {
+        setLoading(false);
+      }
     }
-  }, [canView]);
-
-  useEffect(() => {
-    loadLogs();
-  }, [loadLogs]);
+  }, [currentUser?.uid, verifiedActiveRole, canView, isExporting]);
 
   // Derive unique modules and roles for filter dropdowns
   const availableModules = useMemo(() => {
@@ -178,15 +299,25 @@ export const R24AuditLog: React.FC = () => {
     return filteredLogs.slice(startIndex, startIndex + pageSize);
   }, [filteredLogs, currentPage, pageSize]);
 
-  // Export to CSV Function with Chain of Custody Audit Log
+  // Export to CSV Function with Chain of Custody Audit Log (Anti-Double-Submit & Verified Actor)
   const handleExportCSV = async () => {
-    if (isExporting || !canExport || !canonicalRole) {
-      if (!canExport || !canonicalRole) {
-        setFeedback({
-          type: 'error',
-          message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengekspor data audit trail sistem.'
-        });
-      }
+    if (isExporting) return; // Anti-double-submit
+
+    // Fail-closed authorization gate
+    if (!canExport || !currentUser?.uid || !verifiedActiveRole) {
+      setFeedback({
+        type: 'error',
+        message: 'Akses Ditolak: Anda tidak memiliki wewenang atau sesi aktif untuk mengekspor data audit trail.'
+      });
+      return;
+    }
+
+    // Authentic actor verification: zero synthetic fallback
+    if (!actorDisplayName) {
+      setFeedback({
+        type: 'error',
+        message: 'Akses Ditolak: Identitas aktor sesi tidak dapat diverifikasi secara sah.'
+      });
       return;
     }
 
@@ -206,8 +337,8 @@ export const R24AuditLog: React.FC = () => {
         `"${new Date(l.timestamp).toLocaleString('id-ID')}"`,
         `"${l.userName || 'System'}"`,
         `"${l.role || '-'}"`,
-        `"${l.action.replace(/"/g, '""')}"`,
-        `"${l.targetModule || 'General'}"`,
+        `"${(l.action || '').replace(/"/g, '""')}"`,
+        `"${(l.targetModule || 'General').replace(/"/g, '""')}"`,
         `"${getLogSeverity(l.action)}"`
       ]);
 
@@ -220,13 +351,12 @@ export const R24AuditLog: React.FC = () => {
       link.click();
       document.body.removeChild(link);
 
-      // Audit Chain of Custody
-      const actorName = userProfile?.nama || userProfile?.name || user?.displayName || 'Administrator';
+      // Audit Chain of Custody with Verified Actor Identity (No synthetic 'Administrator')
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        actorDisplayName,
+        verifiedActiveRole,
         'R24_AUDIT_LOG_EXPORT',
-        `R24 Audit Trail - Diekspor ${filteredLogs.length} entri CSV`
+        `R24 Audit Trail - Diekspor ${filteredLogs.length} entri CSV oleh ${actorDisplayName} (${verifiedActiveRole})`
       ).catch((err) => {
         console.warn('Chain of custody logAction warning:', err);
       });
@@ -288,7 +418,15 @@ export const R24AuditLog: React.FC = () => {
             Halaman rekam jejak audit sistem dan log forensik hanya dapat diakses oleh Super Admin, Admin, atau Kepala Sekolah.
           </p>
           <div className="inline-flex items-center gap-2 text-xs font-bold text-stone-500 bg-stone-100 px-3 py-1.5 rounded-full">
-            <User className="w-3.5 h-3.5" /> Role Terdeteksi: {canonicalRole || 'GUEST'}
+            <User className="w-3.5 h-3.5" /> Role Terdeteksi: {verifiedActiveRole || 'UNAUTHENTICATED / GUEST'}
+          </div>
+          <div className="pt-2">
+            <a
+              href="/sim?tab=r1"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-bold transition shadow-xs"
+            >
+              Kembali ke Dashboard Utama
+            </a>
           </div>
         </div>
       </div>
@@ -342,7 +480,7 @@ export const R24AuditLog: React.FC = () => {
                 <Lock className="w-3 h-3" /> Read-Only Immutable
               </span>
               <span className="text-xs font-bold uppercase tracking-wider text-slate-700 bg-slate-100 px-3 py-1 rounded-full border border-slate-200 flex items-center gap-1">
-                <User className="w-3 h-3" /> Operator: {canonicalRole || 'GUEST'}
+                <User className="w-3 h-3" /> Operator: {verifiedActiveRole || 'GUEST'}{actorDisplayName ? ` (${actorDisplayName})` : ''}
               </span>
             </div>
             <h1 className="text-2xl font-black text-slate-900 mt-1">
