@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ArticleCMS,
@@ -7,7 +7,6 @@ import {
   WebsiteProgram,
   WebsiteTeacherPublic,
   WebsiteAchievement,
-  WebsiteAnnouncement,
   WebsiteFAQ,
   WebsiteEventItem,
   UserRole
@@ -37,6 +36,8 @@ import {
   RefreshCw,
   AlertTriangle,
   ShieldCheck,
+  ShieldAlert,
+  ArrowLeft,
   X,
   Info
 } from 'lucide-react';
@@ -45,15 +46,46 @@ import { ProductionLockManager } from './ProductionLockManager';
 import { AIWebsiteAdvisor2 } from './AIWebsiteAdvisor2.0';
 import { FinalReleaseCandidateReport } from './FinalReleaseCandidateReport';
 
-export const R22CMSWebsite: React.FC = () => {
-  const { user, userProfile, activeRole } = useAuth();
-  const actorName = userProfile?.nama || userProfile?.name || user?.displayName || 'Admin CMS';
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+] as const;
 
-  // Fail-closed canonical role resolution
-  const canonicalRole = (activeRole || userProfile?.role || null) as UserRole | null;
-  const canManage =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
+const R22_AUTHORIZED_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KEPALA_SEKOLAH'
+] as const;
+
+const generateEntityId = (prefix: string): string => {
+  return `${prefix}-${crypto.randomUUID()}`;
+};
+
+export const R22CMSWebsite: React.FC = () => {
+  const { currentUser, userProfile, activeRole } = useAuth();
+
+  // Authoritative role validation strictly from activeRole (Zero profile fallback)
+  const verifiedActiveRole = useMemo<UserRole | null>(() => {
+    if (!currentUser?.uid || !activeRole) return null;
+    return CANONICAL_ROLES.includes(activeRole as UserRole) ? (activeRole as UserRole) : null;
+  }, [currentUser?.uid, activeRole]);
+
+  const canManage = Boolean(
+    currentUser?.uid &&
+    verifiedActiveRole &&
+    R22_AUTHORIZED_ROLES.includes(verifiedActiveRole)
+  );
+
+  // Authentic actor identity for display and audit logging (Zero synthetic "Admin CMS" fallback)
+  const actorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || currentUser?.uid || '';
+  const auditActor = currentUser?.email || currentUser?.uid || actorName || 'UNAUTHENTICATED';
 
   const [activeTab, setActiveTab] = useState<'homepage' | 'news' | 'events' | 'programs' | 'teachers' | 'achievements' | 'gallery' | 'faq' | 'selfcheck'>('homepage');
 
@@ -70,7 +102,6 @@ export const R22CMSWebsite: React.FC = () => {
   const [achievements, setAchievements] = useState<WebsiteAchievement[]>([]);
   const [gallery, setGallery] = useState<MediaItem[]>([]);
   const [faqs, setFaqs] = useState<WebsiteFAQ[]>([]);
-  const [, setAnnouncements] = useState<WebsiteAnnouncement[]>([]);
 
   // Standard In-App Feedback
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -90,14 +121,27 @@ export const R22CMSWebsite: React.FC = () => {
     issues: { level: 'error' | 'warning' | 'pass'; title: string; desc: string }[];
   } | null>(null);
 
-  useEffect(() => {
-    loadAllData();
-  }, []);
+  const querySequenceRef = useRef<number>(0);
 
-  const loadAllData = async () => {
+  const loadAllData = useCallback(async () => {
+    const currentSeq = ++querySequenceRef.current;
+
+    if (!currentUser?.uid || !verifiedActiveRole || !canManage) {
+      setHomepageConfig(null);
+      setArticles([]);
+      setEvents([]);
+      setPrograms([]);
+      setTeachers([]);
+      setAchievements([]);
+      setGallery([]);
+      setFaqs([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      const [hp, art, ev, pr, tc, ac, me, fq, an] = await Promise.all([
+      const [hp, art, ev, pr, tc, ac, me, fq] = await Promise.all([
         DataService.getHomepageConfig(),
         DataService.getArticles(),
         DataService.getWebsiteEvents(),
@@ -105,34 +149,52 @@ export const R22CMSWebsite: React.FC = () => {
         DataService.getWebsiteTeachersPublic(),
         DataService.getWebsiteAchievements(),
         DataService.getMedia(),
-        DataService.getWebsiteFAQs(),
-        DataService.getWebsiteAnnouncements()
+        DataService.getWebsiteFAQs()
       ]);
-      setHomepageConfig(hp);
-      setArticles(art || []);
-      setEvents(ev || []);
-      setPrograms(pr || []);
-      setTeachers(tc || []);
-      setAchievements(ac || []);
-      setGallery(me || []);
-      setFaqs(fq || []);
-      setAnnouncements(an || []);
+
+      if (querySequenceRef.current === currentSeq) {
+        setHomepageConfig(hp);
+        setArticles(art || []);
+        setEvents(ev || []);
+        setPrograms(pr || []);
+        setTeachers(tc || []);
+        setAchievements(ac || []);
+        setGallery(me || []);
+        setFaqs(fq || []);
+        setLoading(false);
+      }
     } catch (e: any) {
-      console.error('Error loading website CMS data:', e);
-      setFeedback({
-        type: 'error',
-        message: `Gagal memuat data CMS Website: ${e?.message || 'Terjadi gangguan sinkronisasi.'}`
-      });
-    } finally {
-      setLoading(false);
+      if (querySequenceRef.current === currentSeq) {
+        console.error('Error loading website CMS data:', e);
+        setFeedback({
+          type: 'error',
+          message: `Gagal memuat data CMS Website: ${e?.message || 'Terjadi gangguan sinkronisasi.'}`
+        });
+        setLoading(false);
+      }
+    }
+  }, [currentUser?.uid, verifiedActiveRole, canManage]);
+
+  useEffect(() => {
+    loadAllData();
+    return () => {
+      querySequenceRef.current++;
+    };
+  }, [loadAllData]);
+
+  const handleBackToSim = () => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('tade_sim_tab');
+      localStorage.removeItem('tade_sim_tab');
+      window.location.href = '/sim';
     }
   };
 
   // 1. Save Homepage Config
   const handleSaveHomepage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving || !canManage || !canonicalRole || !homepageConfig) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !homepageConfig) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengubah konfigurasi beranda CMS.'
@@ -145,8 +207,8 @@ export const R22CMSWebsite: React.FC = () => {
     try {
       await DataService.saveHomepageConfig(homepageConfig);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_HOMEPAGE_UPDATE',
         'Pusat CMS - Memperbarui Konfigurasi Hero & Urutan Beranda Website'
       );
@@ -166,7 +228,7 @@ export const R22CMSWebsite: React.FC = () => {
 
   // Reorder Sections
   const handleMoveSection = (index: number, direction: 'up' | 'down') => {
-    if (!canManage || !canonicalRole || !homepageConfig) return;
+    if (!canManage || !currentUser?.uid || !verifiedActiveRole || !homepageConfig) return;
     const newOrder = [...homepageConfig.sectionOrder];
     const targetIdx = direction === 'up' ? index - 1 : index + 1;
     if (targetIdx < 0 || targetIdx >= newOrder.length) return;
@@ -178,8 +240,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 2. Save News Article
   const handleSaveArticle = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingArticle?.title) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingArticle?.title) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk menerbitkan atau mengedit artikel berita.'
@@ -191,20 +253,20 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: ArticleCMS = {
-        id: editingArticle.id || 'art-' + Date.now(),
+        id: editingArticle.id || generateEntityId('art'),
         title: editingArticle.title || '',
         slug: (editingArticle.title || '').toLowerCase().replace(/\s+/g, '-'),
         body: editingArticle.body || '',
         category: (editingArticle.category as any) || 'Berita',
         image: editingArticle.image || 'https://images.unsplash.com/photo-1577896851231-70ef18881754?auto=format&fit=crop&q=80&w=800',
-        author: editingArticle.author || actorName,
+        author: editingArticle.author || actorName || auditActor,
         date: editingArticle.date || new Date().toISOString().split('T')[0],
         isPublished: editingArticle.isPublished ?? true
       };
       await DataService.saveArticle(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_ARTICLE_SAVE',
         `Pusat CMS - Menyimpan Artikel Berita '${item.title}' (${item.category})`
       );
@@ -227,8 +289,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 3. Save Event
   const handleSaveEvent = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingEvent?.title) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingEvent?.title) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk menyimpan agenda madrasah.'
@@ -240,7 +302,7 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: WebsiteEventItem = {
-        id: editingEvent.id || 'evt-' + Date.now(),
+        id: editingEvent.id || generateEntityId('evt'),
         title: editingEvent.title || '',
         date: editingEvent.date || new Date().toISOString().split('T')[0],
         time: editingEvent.time || '08:00 WIB',
@@ -251,8 +313,8 @@ export const R22CMSWebsite: React.FC = () => {
       };
       await DataService.saveWebsiteEvent(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_EVENT_SAVE',
         `Pusat CMS - Menyimpan Agenda Sekolah '${item.title}' (${item.date})`
       );
@@ -275,8 +337,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 4. Save Program
   const handleSaveProgram = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingProgram?.title) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingProgram?.title) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengubah program sentra.'
@@ -288,7 +350,7 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: WebsiteProgram = {
-        id: editingProgram.id || 'prog-' + Date.now(),
+        id: editingProgram.id || generateEntityId('prog'),
         title: editingProgram.title || '',
         category: editingProgram.category || 'Sentra Belajar',
         description: editingProgram.description || '',
@@ -299,8 +361,8 @@ export const R22CMSWebsite: React.FC = () => {
       };
       await DataService.saveWebsiteProgram(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_PROGRAM_SAVE',
         `Pusat CMS - Menyimpan Sentra Belajar '${item.title}'`
       );
@@ -323,8 +385,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 5. Save Teacher Public Profile
   const handleSaveTeacher = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingTeacher?.name) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingTeacher?.name) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengubah profil pendidik publik.'
@@ -336,7 +398,7 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: WebsiteTeacherPublic = {
-        id: editingTeacher.id || 'tch-' + Date.now(),
+        id: editingTeacher.id || generateEntityId('tch'),
         name: editingTeacher.name || '',
         title: editingTeacher.title || 'S.Pd.',
         position: editingTeacher.position || 'Guru Sentra Belajar',
@@ -346,8 +408,8 @@ export const R22CMSWebsite: React.FC = () => {
       };
       await DataService.saveWebsiteTeacherPublic(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_TEACHER_SAVE',
         `Pusat CMS - Menyimpan Profil Guru Publik '${item.name}'`
       );
@@ -370,8 +432,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 6. Save Achievement
   const handleSaveAchievement = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingAchievement?.title) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingAchievement?.title) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk memperbarui prestasi madrasah.'
@@ -383,7 +445,7 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: WebsiteAchievement = {
-        id: editingAchievement.id || 'ach-' + Date.now(),
+        id: editingAchievement.id || generateEntityId('ach'),
         title: editingAchievement.title || '',
         winnerName: editingAchievement.winnerName || 'Santri TK Asy Syifa',
         category: editingAchievement.category || 'Tahfidz & Keagamaan',
@@ -393,8 +455,8 @@ export const R22CMSWebsite: React.FC = () => {
       };
       await DataService.saveWebsiteAchievement(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_ACHIEVEMENT_SAVE',
         `Pusat CMS - Menyimpan Data Prestasi '${item.title}' (${item.winnerName})`
       );
@@ -417,8 +479,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 7. Save Media Photo
   const handleSaveMedia = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingMedia?.title || !editingMedia?.url) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingMedia?.title || !editingMedia?.url) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk mengunggah media galeri.'
@@ -430,7 +492,7 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: MediaItem = {
-        id: editingMedia.id || 'med-' + Date.now(),
+        id: editingMedia.id || generateEntityId('med'),
         title: editingMedia.title || '',
         url: editingMedia.url || '',
         type: editingMedia.type || 'gallery',
@@ -441,8 +503,8 @@ export const R22CMSWebsite: React.FC = () => {
       };
       await DataService.saveMedia(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_MEDIA_SAVE',
         `Pusat CMS - Menambahkan Media Galeri '${item.title}'`
       );
@@ -465,8 +527,8 @@ export const R22CMSWebsite: React.FC = () => {
 
   // 8. Save FAQ
   const handleSaveFAQ = async () => {
-    if (isSaving || !canManage || !canonicalRole || !editingFAQ?.question || !editingFAQ?.answer) {
-      if (!canManage || !canonicalRole) {
+    if (isSaving || !canManage || !currentUser?.uid || !verifiedActiveRole || !editingFAQ?.question || !editingFAQ?.answer) {
+      if (!canManage || !currentUser?.uid || !verifiedActiveRole) {
         setFeedback({
           type: 'error',
           message: 'Akses Ditolak: Anda tidak memiliki wewenang untuk menyimpan tanya jawab FAQ.'
@@ -478,15 +540,15 @@ export const R22CMSWebsite: React.FC = () => {
     setIsSaving(true);
     try {
       const item: WebsiteFAQ = {
-        id: editingFAQ.id || 'faq-' + Date.now(),
+        id: editingFAQ.id || generateEntityId('faq'),
         question: editingFAQ.question || '',
         answer: editingFAQ.answer || '',
         category: editingFAQ.category || 'Umum'
       };
       await DataService.saveWebsiteFAQ(item);
       await DataService.logAction(
-        actorName,
-        canonicalRole,
+        auditActor,
+        verifiedActiveRole,
         'R22_FAQ_SAVE',
         `Pusat CMS - Menyimpan Tanya Jawab FAQ '${item.question}'`
       );
@@ -670,8 +732,42 @@ export const R22CMSWebsite: React.FC = () => {
     );
   }
 
+  // Fail-Closed Security Boundary: Deny access if unauthenticated or not in authorized CMS roles
+  if (!currentUser?.uid || !verifiedActiveRole || !canManage) {
+    return (
+      <div id="r22-access-denied-container" className="space-y-6">
+        <div className="p-8 bg-red-50/90 border border-red-200 rounded-3xl text-center space-y-4 shadow-sm max-w-2xl mx-auto my-8">
+          <div className="w-16 h-16 bg-red-100 text-red-700 rounded-full flex items-center justify-center mx-auto shadow-inner">
+            <ShieldAlert className="w-8 h-8" />
+          </div>
+          <div className="space-y-2">
+            <span className="text-[10px] font-black uppercase tracking-wider bg-red-200/60 text-red-900 px-3 py-1 rounded-full inline-block">
+              Akses Terbatas — CMS Website Resmi
+            </span>
+            <h3 className="text-xl font-extrabold text-red-950">
+              Otorisasi Pengelolaan CMS Diperlukan
+            </h3>
+            <p className="text-xs text-red-800 leading-relaxed max-w-lg mx-auto">
+              Halaman pengelolaan konten website resmi TK Islam Asy-Syifa Tanggul (Beranda, Berita, Agenda, Sentra, Pendidik, Galeri, dan FAQ) hanya dapat diakses oleh personil terotorisasi: <strong>Super Admin</strong>, <strong>Administrator</strong>, atau <strong>Kepala Sekolah</strong>.
+            </p>
+          </div>
+          <div className="pt-3 flex justify-center gap-3">
+            <button
+              id="btn-r22-back-sim"
+              type="button"
+              onClick={handleBackToSim}
+              className="px-6 py-2.5 bg-red-900 hover:bg-red-800 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-2 cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" /> Kembali ke Portal SIM
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-6">
+    <div id="r22-cms-container" className="space-y-6">
       {/* CMS Header Section with AI Asy & Syifa */}
       <div className="bg-slate-900 border border-stone-800 text-white rounded-3xl p-6 sm:p-8 shadow-xl">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
@@ -684,7 +780,7 @@ export const R22CMSWebsite: React.FC = () => {
                 TK ASY SYIFA TANGGUL
               </span>
               <span className="text-xs font-semibold text-stone-400">
-                Operator: <strong className="text-stone-200">{actorName}</strong> ({canonicalRole || 'GUEST'})
+                Operator: <strong className="text-stone-200">{actorName || auditActor}</strong> ({verifiedActiveRole})
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
@@ -872,6 +968,7 @@ export const R22CMSWebsite: React.FC = () => {
             </div>
 
             <button
+              id="btn-r22-save-homepage"
               type="submit"
               disabled={isSaving}
               className="px-6 py-3 bg-emerald-800 hover:bg-emerald-700 text-white font-extrabold rounded-2xl shadow-md flex items-center gap-2 cursor-pointer transition disabled:opacity-50"
@@ -945,6 +1042,7 @@ export const R22CMSWebsite: React.FC = () => {
                 <p className="text-stone-500 text-xs">Berita yang diterbitkan langsung tayang di portal beranda & arsip informasi sekolah.</p>
               </div>
               <button
+                id="btn-r22-add-article"
                 type="button"
                 onClick={() => setEditingArticle({ title: '', body: '', category: 'Berita', author: actorName })}
                 className="px-4 py-2 bg-emerald-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-xs hover:bg-emerald-700 cursor-pointer"
@@ -1092,6 +1190,7 @@ export const R22CMSWebsite: React.FC = () => {
               <p className="text-stone-500">Agenda sekolah (Market Day, Manasik, Outing, Lomba, PHBI) langsung terisi ke beranda & kalender.</p>
             </div>
             <button
+              id="btn-r22-add-event"
               type="button"
               onClick={() => setEditingEvent({ title: '', category: 'Market Day', time: '08:00 WIB', location: 'Halaman TK Asy Syifa Tanggul' })}
               className="px-4 py-2 bg-emerald-800 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs cursor-pointer hover:bg-emerald-700"
