@@ -36,6 +36,7 @@ import {
   Pin,
   Archive,
   Shield,
+  Lock,
   ArrowRight,
   History,
   Sliders,
@@ -52,6 +53,18 @@ import {
   Search,
   RefreshCw
 } from 'lucide-react';
+
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+];
 
 interface AutomationRule {
   id: string;
@@ -156,29 +169,61 @@ export const NotificationCenter: React.FC = () => {
     'INBOX' | 'APPROVALS' | 'RULE_ENGINE' | 'RECOMMENDATIONS' | 'TIMELINE' | 'SCHEDULER' | 'LOGS'
   >('INBOX');
 
-  // Canonical Role Resolution (Strictly Fail-Closed, No Privileged Fallbacks)
-  const canonicalRole = (activeRole || userProfile?.role || null) as UserRole | null;
+  // 1. Authoritative Fail-Closed Active Role Determination (SEC-01 & SEC-02)
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER overrides activeRole, and no raw type-cast without array check.
+  const verifiedActiveRole = useMemo<UserRole | null>(() => {
+    if (!currentUser?.uid || !activeRole) return null;
+    return CANONICAL_ROLES.includes(activeRole as UserRole) ? (activeRole as UserRole) : null;
+  }, [currentUser?.uid, activeRole]);
 
-  // Authority Matrix
-  const canBroadcast =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
+  // Authentic Actor Identity Resolution (Zero synthetic fallbacks, NO 'Pengguna SIM' / 'Administrator')
+  const actorDisplayName = useMemo(() => {
+    if (!currentUser?.uid) return '';
+    return (
+      currentUser.displayName?.trim() ||
+      userProfile?.nama?.trim() ||
+      userProfile?.name?.trim() ||
+      currentUser.email?.trim() ||
+      `User (${currentUser.uid.slice(0, 8)})`
+    );
+  }, [currentUser, userProfile]);
 
-  const canApprovePPDB =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(canonicalRole);
+  // Authority Matrix strictly based on verifiedActiveRole
+  const canBroadcast = useMemo(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(verifiedActiveRole)
+    );
+  }, [verifiedActiveRole]);
 
-  const canApproveSPP =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'BENDAHARA'].includes(canonicalRole);
+  const canApprovePPDB = useMemo(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH'].includes(verifiedActiveRole)
+    );
+  }, [verifiedActiveRole]);
 
-  const canViewOperationalEngines =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'BENDAHARA'].includes(canonicalRole);
+  const canApproveSPP = useMemo(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'BENDAHARA', 'KEUANGAN'].includes(verifiedActiveRole as any)
+    );
+  }, [verifiedActiveRole]);
 
-  const canExecuteRules =
-    !!canonicalRole &&
-    ['SUPER_ADMIN', 'ADMIN'].includes(canonicalRole);
+  const canViewOperationalEngines = useMemo(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'BENDAHARA', 'KEUANGAN'].includes(verifiedActiveRole as any)
+    );
+  }, [verifiedActiveRole]);
+
+  const canExecuteRules = useMemo(() => {
+    return Boolean(
+      verifiedActiveRole &&
+      ['SUPER_ADMIN', 'ADMIN'].includes(verifiedActiveRole)
+    );
+  }, [verifiedActiveRole]);
 
   // Notifications State
   const [notifications, setNotifications] = useState<SystemNotification[]>([]);
@@ -243,13 +288,32 @@ export const NotificationCenter: React.FC = () => {
     }
   ]);
 
-  // Fetch notifications & operational data (Strict Data Isolation)
+  // Fetch notifications & operational data (Strict Data Isolation & Stale Race Guard)
   useEffect(() => {
-    const userId = currentUser?.uid;
+    let isCurrent = true;
+
+    // Hard pre-query authorization gate:
+    // If unauthenticated or role is non-canonical -> DENY, do NOT query or subscribe Firestore
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setNotifications([]);
+      setPpdbList([]);
+      setSppList([]);
+      setAuditLogs([]);
+      setLoading(false);
+      return () => {
+        isCurrent = false;
+      };
+    }
 
     setLoading(true);
-    const unsub = DataService.subscribeNotifications(userId, canonicalRole || undefined, (list) => {
-      setNotifications(list);
+    setNotifications([]);
+    setPpdbList([]);
+    setSppList([]);
+    setAuditLogs([]);
+
+    const unsub = DataService.subscribeNotifications(currentUser.uid, verifiedActiveRole, (list) => {
+      if (!isCurrent) return;
+      setNotifications(list || []);
       setLoading(false);
     });
 
@@ -259,6 +323,7 @@ export const NotificationCenter: React.FC = () => {
       setSppList([]);
       setAuditLogs([]);
       return () => {
+        isCurrent = false;
         unsub();
       };
     }
@@ -270,10 +335,12 @@ export const NotificationCenter: React.FC = () => {
           DataService.getSPP(),
           DataService.getAuditLogs()
         ]);
-        setPpdbList(ppdbs);
-        setSppList(spps);
-        setAuditLogs(audits);
+        if (!isCurrent) return;
+        setPpdbList(ppdbs || []);
+        setSppList(spps || []);
+        setAuditLogs(audits || []);
       } catch (e) {
+        if (!isCurrent) return;
         console.error('Error loading operational data for Workflow Engine:', e);
       }
     };
@@ -281,9 +348,10 @@ export const NotificationCenter: React.FC = () => {
     loadData();
 
     return () => {
+      isCurrent = false;
       unsub();
     };
-  }, [currentUser?.uid, canonicalRole, canViewOperationalEngines]);
+  }, [currentUser?.uid, verifiedActiveRole, canViewOperationalEngines]);
 
   // Derived Pending Approvals from Real Firestore Records
   const pendingApprovals = useMemo<PendingApprovalItem[]>(() => {
@@ -376,15 +444,15 @@ export const NotificationCenter: React.FC = () => {
     return recs;
   }, [ppdbList, sppList]);
 
-  // Handle Mark As Read
+  // Handle Mark As Read (Fail-closed)
   const handleMarkAsRead = async (id: string) => {
+    if (!currentUser?.uid || !verifiedActiveRole) return;
     await DataService.markAsRead(id);
   };
 
   const handleMarkAllRead = async () => {
-    if (currentUser?.uid) {
-      await DataService.markAllAsRead(currentUser.uid);
-    }
+    if (!currentUser?.uid || !verifiedActiveRole) return;
+    await DataService.markAllAsRead(currentUser.uid);
   };
 
   // Toggle Pin Notification
@@ -405,11 +473,11 @@ export const NotificationCenter: React.FC = () => {
     if (submittingBroadcast) return;
 
     // Fail-closed authorization boundary
-    if (!canonicalRole) {
+    if (!currentUser?.uid || !verifiedActiveRole || !actorDisplayName) {
       setNotification({
         type: 'error',
         title: 'Akses Ditolak',
-        message: 'Akses Ditolak: peran pengguna belum terverifikasi.'
+        message: 'Akses Ditolak: identitas sesi atau peran pengguna belum terverifikasi.'
       });
       return;
     }
@@ -433,8 +501,8 @@ export const NotificationCenter: React.FC = () => {
     }
 
     setSubmittingBroadcast(true);
-    const operatorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || 'Pengguna SIM';
-    const operatorRole = canonicalRole;
+    const operatorName = actorDisplayName;
+    const operatorRole = verifiedActiveRole;
 
     try {
       const startTime = performance.now();
@@ -465,10 +533,10 @@ export const NotificationCenter: React.FC = () => {
         `Mengirim pengumuman ${broadcastData.targetType === 'BROADCAST' ? 'Global ke semua pengguna' : `ke peran ${broadcastData.targetRole}`}: "${broadcastData.title}"`
       );
 
-      // Add automation log
+      // Add automation log with deterministic RFC4122 UUID
       setAutomationLogs((prev) => [
         {
-          id: `LOG_${Date.now()}`,
+          id: `LOG_${crypto.randomUUID()}`,
           timestamp: new Date().toISOString(),
           ruleName: `Manual Broadcast: ${broadcastData.title}`,
           status: 'SUCCESS',
@@ -510,11 +578,11 @@ export const NotificationCenter: React.FC = () => {
     // Re-entry & anti double-submit protection
     if (processingApprovalId) return;
 
-    if (!canonicalRole) {
+    if (!currentUser?.uid || !verifiedActiveRole || !actorDisplayName) {
       setNotification({
         type: 'error',
         title: 'Akses Ditolak',
-        message: 'Akses Ditolak: peran pengguna belum terverifikasi.'
+        message: 'Akses Ditolak: identitas sesi atau peran pengguna belum terverifikasi.'
       });
       return;
     }
@@ -547,8 +615,8 @@ export const NotificationCenter: React.FC = () => {
     }
 
     setProcessingApprovalId(item.id);
-    const operatorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || 'Pengguna SIM';
-    const operatorRole = canonicalRole;
+    const operatorName = actorDisplayName;
+    const operatorRole = verifiedActiveRole;
     const startTime = performance.now();
 
     try {
@@ -565,8 +633,8 @@ export const NotificationCenter: React.FC = () => {
       // Refresh list only if management role is authorized
       if (canViewOperationalEngines) {
         const [ppdbs, spps] = await Promise.all([DataService.getPPDBRecords(), DataService.getSPP()]);
-        setPpdbList(ppdbs);
-        setSppList(spps);
+        setPpdbList(ppdbs || []);
+        setSppList(spps || []);
       }
 
       const durationMs = Math.max(1, Math.round(performance.now() - startTime));
@@ -578,10 +646,10 @@ export const NotificationCenter: React.FC = () => {
         `Keputusan approval ${item.type} [${item.id}]: ${approve ? 'DISETUJUI' : 'DITOLAK'} (${item.title})`
       );
 
-      // Log automation
+      // Log automation with deterministic UUID
       setAutomationLogs((prev) => [
         {
-          id: `LOG_${Date.now()}`,
+          id: `LOG_${crypto.randomUUID()}`,
           timestamp: new Date().toISOString(),
           ruleName: `Approval Process: ${item.title}`,
           status: 'SUCCESS',
@@ -611,7 +679,7 @@ export const NotificationCenter: React.FC = () => {
 
   // Toggle Rule Enable/Disable (Strict Role Boundary)
   const toggleRule = (ruleId: string) => {
-    if (!canonicalRole) {
+    if (!currentUser?.uid || !verifiedActiveRole) {
       setNotification({
         type: 'error',
         title: 'Akses Ditolak',
@@ -645,11 +713,11 @@ export const NotificationCenter: React.FC = () => {
     // Re-entry & anti double-submit protection
     if (runningRuleId) return;
 
-    if (!canonicalRole) {
+    if (!currentUser?.uid || !verifiedActiveRole || !actorDisplayName) {
       setNotification({
         type: 'error',
         title: 'Akses Ditolak',
-        message: 'Akses Ditolak: peran pengguna belum terverifikasi.'
+        message: 'Akses Ditolak: identitas sesi atau peran pengguna belum terverifikasi.'
       });
       return;
     }
@@ -664,8 +732,8 @@ export const NotificationCenter: React.FC = () => {
     }
 
     setRunningRuleId(rule.id);
-    const operatorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || 'Pengguna SIM';
-    const operatorRole = canonicalRole;
+    const operatorName = actorDisplayName;
+    const operatorRole = verifiedActiveRole;
     const startTime = performance.now();
 
     try {
@@ -680,7 +748,7 @@ export const NotificationCenter: React.FC = () => {
 
       setAutomationLogs((prev) => [
         {
-          id: `LOG_${Date.now()}`,
+          id: `LOG_${crypto.randomUUID()}`,
           timestamp: new Date().toISOString(),
           ruleName: rule.name,
           status: 'SUCCESS',
@@ -766,8 +834,37 @@ export const NotificationCenter: React.FC = () => {
     return <Bell className="w-4 h-4 text-slate-600" />;
   };
 
+  // Fail-Closed Access Denied Boundary for Unauthenticated / Non-Canonical Role
+  if (!currentUser?.uid || !verifiedActiveRole) {
+    return (
+      <div id="r15-access-denied-container" className="space-y-6 font-sans">
+        <div className="bg-white rounded-3xl p-8 border border-stone-200 shadow-xs text-center space-y-4">
+          <div className="w-16 h-16 bg-rose-50 rounded-2xl flex items-center justify-center mx-auto border border-rose-200 text-rose-600">
+            <Lock className="w-8 h-8" />
+          </div>
+          <h2 className="text-xl font-black text-slate-900">Akses Ditolak: Hak Akses Tidak Mencukupi</h2>
+          <p className="text-stone-600 text-sm max-w-md mx-auto">
+            Halaman Pusat Otomatisasi Alur Kerja &amp; Notifikasi hanya dapat diakses oleh pengguna terautentikasi dengan peran sah di TK Islam Terpadu Asy Syifa.
+          </p>
+          <div className="inline-flex items-center gap-2 text-xs font-bold text-stone-500 bg-stone-100 px-3 py-1.5 rounded-full">
+            <Shield className="w-3.5 h-3.5" /> Role Terdeteksi: {verifiedActiveRole || 'UNAUTHENTICATED / GUEST'}
+          </div>
+          <div className="pt-2">
+            <a
+              id="btn-r15-back-sim"
+              href="/sim?tab=r1"
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-bold transition shadow-xs"
+            >
+              Kembali ke Dashboard Utama
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="space-y-6">
+    <motion.div id="r15-notification-hub-container" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="space-y-6">
       {/* Header Banner */}
       <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-6">
         <div className="flex items-center gap-5">
