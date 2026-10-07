@@ -27,8 +27,21 @@ import {
   UserCheck,
   Layers,
   AlertTriangle,
-  Info
+  Info,
+  Lock
 } from 'lucide-react';
+
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY'
+];
 
 interface FeedbackState {
   type: 'success' | 'error' | 'info';
@@ -87,10 +100,28 @@ export const R16SmartDocumentFactory: React.FC = () => {
   const [pdfHtml, setPdfHtml] = useState<string>('');
 
   // Canonical Identity & RBAC Resolution (Fail Closed)
-  const effectiveRole = (activeRole || userProfile?.role || null) as UserRole | null;
-  const actorName = userProfile?.nama || userProfile?.name || currentUser?.displayName || currentUser?.email || (currentUser?.uid ? `User (${currentUser.uid.slice(0, 8)})` : 'Pengguna');
-  const actorUid = currentUser?.uid || '';
-  const canApprove = !!effectiveRole && ['SUPER_ADMIN', 'KEPALA_SEKOLAH'].includes(effectiveRole);
+  // 1. Authoritative Fail-Closed Active Role Determination
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER overrides activeRole, and no raw fallback exists.
+  const verifiedActiveRole: UserRole | null = (
+    currentUser?.uid &&
+    activeRole &&
+    CANONICAL_ROLES.includes(activeRole)
+  ) ? activeRole : null;
+
+  // Authentic Actor Name Resolution (No synthetic actor fallback)
+  const actorName =
+    currentUser?.displayName ||
+    userProfile?.nama ||
+    userProfile?.name ||
+    currentUser?.email ||
+    (currentUser?.uid ? `User (${currentUser.uid.slice(0, 8)})` : 'Pengguna SIM');
+
+  // Permissions Matrix (Strictly Gated by Verified Active Role)
+  const canApprove = !!verifiedActiveRole && ['SUPER_ADMIN', 'KEPALA_SEKOLAH'].includes(verifiedActiveRole);
+  const canCreate = !!verifiedActiveRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU', 'KEUANGAN'].includes(verifiedActiveRole);
+  const canArchive = !!verifiedActiveRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU'].includes(verifiedActiveRole);
+  const canViewMasterData = !!verifiedActiveRole && ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU', 'KEUANGAN', 'KETUA_YAYASAN'].includes(verifiedActiveRole);
 
   // Auto-dismiss feedback banner after 6 seconds
   useEffect(() => {
@@ -100,36 +131,71 @@ export const R16SmartDocumentFactory: React.FC = () => {
     }
   }, [feedback]);
 
+  // Fetch templates, master data & subscribe documents (Authoritative Gate & Stale Race Guard)
   useEffect(() => {
+    let isCurrent = true;
+
+    // Hard Pre-Query Authorization Gate
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setTemplates([]);
+      setDocuments([]);
+      setStudents([]);
+      setTeachers([]);
+      setLoading(false);
+      return;
+    }
+
+    // Role boundary gate: Parents and non-operational roles cannot query document factory
+    if (['WALI_MURID', 'CALON_WALI_MURID', 'ALUMNI_FAMILY'].includes(verifiedActiveRole)) {
+      setTemplates([]);
+      setDocuments([]);
+      setStudents([]);
+      setTeachers([]);
+      setLoading(false);
+      return;
+    }
+
     const loadInitData = async () => {
       setLoading(true);
       try {
-        const [tpls, stds, tchs] = await Promise.all([
+        const promises: [Promise<DocumentTemplate[]>, Promise<Student[]>, Promise<Teacher[]>] = [
           DataService.getTemplates(),
-          DataService.getStudents(),
-          DataService.getTeachers()
-        ]);
-        setTemplates(tpls);
-        setStudents(stds);
-        setTeachers(tchs);
+          canViewMasterData ? DataService.getStudents() : Promise.resolve([]),
+          canViewMasterData ? DataService.getTeachers() : Promise.resolve([])
+        ];
+
+        const [tpls, stds, tchs] = await Promise.all(promises);
+        if (!isCurrent) return;
+
+        setTemplates(tpls || []);
+        setStudents(stds || []);
+        setTeachers(tchs || []);
       } catch (err: any) {
+        if (!isCurrent) return;
         console.warn('Error loading initial data in SmartDocumentFactory:', err);
         setFeedback({
           type: 'error',
           message: `STATUS: GAGAL → Gagal memuat data master template: ${err?.message || err}`
         });
       } finally {
-        setLoading(false);
+        if (isCurrent) {
+          setLoading(false);
+        }
       }
     };
+
     loadInitData();
 
-    const unsub = DataService.subscribeDocuments(effectiveRole || undefined, actorUid || undefined, (list) => {
+    const unsub = DataService.subscribeDocuments(verifiedActiveRole, currentUser.uid, (list) => {
+      if (!isCurrent) return;
       setDocuments(list || []);
     });
 
-    return () => unsub();
-  }, [actorUid, effectiveRole]);
+    return () => {
+      isCurrent = false;
+      unsub();
+    };
+  }, [currentUser?.uid, verifiedActiveRole, canViewMasterData]);
 
   const matchVar = (v: string, targets: string[]) => {
     const clean = v.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -137,6 +203,13 @@ export const R16SmartDocumentFactory: React.FC = () => {
   };
 
   const handleSelectTemplate = (tpl: DocumentTemplate) => {
+    if (!canCreate) {
+      setFeedback({
+        type: 'error',
+        message: `STATUS: DITOLAK → Peran ${verifiedActiveRole || 'Guest'} tidak memiliki izin membuat dokumen baru.`
+      });
+      return;
+    }
     setSelectedTemplate(tpl);
     setDocumentTitle(tpl.name);
     setSelectedStudentId('');
@@ -247,6 +320,20 @@ export const R16SmartDocumentFactory: React.FC = () => {
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (creating) return;
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setFeedback({
+        type: 'error',
+        message: 'STATUS: DITOLAK → Sesi tidak terautentikasi atau peran tidak valid.'
+      });
+      return;
+    }
+    if (!canCreate) {
+      setFeedback({
+        type: 'error',
+        message: `STATUS: DITOLAK → Peran ${verifiedActiveRole} tidak memiliki izin membuat dokumen baru.`
+      });
+      return;
+    }
     if (!selectedTemplate) return;
 
     setCreating(true);
@@ -257,8 +344,8 @@ export const R16SmartDocumentFactory: React.FC = () => {
         title: documentTitle || selectedTemplate.name,
         category: selectedTemplate.category,
         data: formData,
-        ownerId: actorUid || 'UNKNOWN_USER',
-        ownerRole: effectiveRole || 'GURU',
+        ownerId: currentUser.uid,
+        ownerRole: verifiedActiveRole,
         createdBy: actorName,
         requireApproval,
         approverRole: 'KEPALA_SEKOLAH'
@@ -267,15 +354,15 @@ export const R16SmartDocumentFactory: React.FC = () => {
       // Auto generate PDF
       await DataService.generatePDF(
         newDoc.id,
-        actorUid,
+        currentUser.uid,
         actorName,
-        effectiveRole || 'GURU'
+        verifiedActiveRole
       );
 
       // Canonical Audit Log
       await DataService.logAction(
         actorName,
-        effectiveRole,
+        verifiedActiveRole,
         'CREATE_DOCUMENT',
         `Membuat dokumen ${newDoc.title} (${newDoc.documentNumber}) kategori ${newDoc.category}`
       ).catch(() => {});
@@ -304,6 +391,7 @@ export const R16SmartDocumentFactory: React.FC = () => {
   };
 
   const handleOpenPreview = async (docItem: GeneratedDocument) => {
+    if (!currentUser?.uid || !verifiedActiveRole) return;
     setPreviewDoc(docItem);
     const html = DataService.generatePDFHtml(docItem);
     setPdfHtml(html);
@@ -311,6 +399,7 @@ export const R16SmartDocumentFactory: React.FC = () => {
   };
 
   const handlePrintPDF = () => {
+    if (!currentUser?.uid || !verifiedActiveRole) return;
     const printWindow = window.open('', '_blank');
     if (printWindow) {
       printWindow.document.write(pdfHtml);
@@ -323,15 +412,16 @@ export const R16SmartDocumentFactory: React.FC = () => {
   };
 
   const handleExportExcel = (docItem: GeneratedDocument) => {
+    if (!currentUser?.uid || !verifiedActiveRole) return;
     const headers = ['Field', 'Nilai Parameter'];
     const rows = Object.entries(docItem.data).map(([k, v]) => [k, String(v)]);
     const dataUrl = DataService.generateExcel(
       docItem.title,
       headers,
       rows,
-      actorUid,
+      currentUser.uid,
       actorName,
-      effectiveRole || 'GURU'
+      verifiedActiveRole
     );
 
     const a = document.createElement('a');
@@ -342,7 +432,7 @@ export const R16SmartDocumentFactory: React.FC = () => {
 
   const handleApprove = async (docItem: GeneratedDocument) => {
     if (processingDocId) return;
-    if (!canApprove) {
+    if (!currentUser?.uid || !verifiedActiveRole || !canApprove) {
       setFeedback({
         type: 'error',
         message: 'STATUS: DITOLAK → Akses Ditolak: Hanya SUPER_ADMIN dan KEPALA_SEKOLAH yang berhak menyetujui dokumen.'
@@ -354,15 +444,15 @@ export const R16SmartDocumentFactory: React.FC = () => {
     try {
       await DataService.approveDocument(
         docItem.id,
-        actorUid,
+        currentUser.uid,
         actorName,
-        effectiveRole || 'KEPALA_SEKOLAH'
+        verifiedActiveRole
       );
 
       // Canonical Audit Log
       await DataService.logAction(
         actorName,
-        effectiveRole,
+        verifiedActiveRole,
         'APPROVE_DOCUMENT',
         `Menyetujui dokumen ${docItem.title} (${docItem.documentNumber}) dan otomatis diarsipkan ke Smart Archive`
       ).catch(() => {});
@@ -385,20 +475,27 @@ export const R16SmartDocumentFactory: React.FC = () => {
 
   const handleArchive = async (docItem: GeneratedDocument) => {
     if (isArchivingDocId) return;
+    if (!currentUser?.uid || !verifiedActiveRole || !canArchive) {
+      setFeedback({
+        type: 'error',
+        message: 'STATUS: DITOLAK → Akses Ditolak: Anda tidak memiliki izin untuk mengarsipkan dokumen ini.'
+      });
+      return;
+    }
 
     setIsArchivingDocId(docItem.id);
     try {
       const archiveId = await DataService.archiveDocument(
         docItem.id,
-        actorUid,
+        currentUser.uid,
         actorName,
-        effectiveRole || 'GURU'
+        verifiedActiveRole
       );
 
       // Canonical Audit Log
       await DataService.logAction(
         actorName,
-        effectiveRole,
+        verifiedActiveRole,
         'ARCHIVE_DOCUMENT',
         `Mengarsipkan dokumen ${docItem.title} (${docItem.documentNumber}) ke Smart Archive dengan ID: ${archiveId}`
       ).catch(() => {});
@@ -447,6 +544,53 @@ export const R16SmartDocumentFactory: React.FC = () => {
     }
   };
 
+  // Fail-Closed Access Boundaries
+  if (!currentUser?.uid || !verifiedActiveRole) {
+    return (
+      <div className="bg-white rounded-3xl p-8 border border-stone-200 shadow-xs text-center max-w-xl mx-auto my-12 space-y-4">
+        <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center mx-auto border border-rose-200">
+          <Lock className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-900">Akses Ditolak — Sesi Tidak Terverifikasi</h2>
+        <p className="text-xs text-stone-600 leading-relaxed">
+          Modul Smart Document Factory (R16) membutuhkan sesi terautentikasi dengan otoritas peran kanonik yang sah. Identitas Anda tidak valid atau belum terdaftar pada sistem keamanan SIM.
+        </p>
+        <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 text-xs font-mono text-stone-600">
+          Status: <strong className="text-rose-600">UNAUTHENTICATED / GUEST</strong>
+        </div>
+        <a
+          href="/sim"
+          className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+        >
+          Kembali ke Dashboard SIM
+        </a>
+      </div>
+    );
+  }
+
+  if (['WALI_MURID', 'CALON_WALI_MURID', 'ALUMNI_FAMILY'].includes(verifiedActiveRole)) {
+    return (
+      <div className="bg-white rounded-3xl p-8 border border-stone-200 shadow-xs text-center max-w-xl mx-auto my-12 space-y-4">
+        <div className="w-16 h-16 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto border border-amber-200">
+          <Lock className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-900">Akses Dibatasi — Batas Wewenang Dokumen</h2>
+        <p className="text-xs text-stone-600 leading-relaxed">
+          Modul Smart Document Factory (R16) dikhususkan untuk Manajemen Sekolah, Kepala Sekolah, Pendidik, dan Staf Administrasi. Peran Anda ({verifiedActiveRole}) tidak memiliki izin penerbitan dokumen resmi dan akses master data civitas sekolah.
+        </p>
+        <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 text-xs font-mono text-stone-600">
+          Role Terdeteksi: <strong className="text-amber-700">{verifiedActiveRole}</strong>
+        </div>
+        <a
+          href="/sim"
+          className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+        >
+          Kembali ke Dashboard SIM
+        </a>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Header Banner */}
@@ -463,14 +607,16 @@ export const R16SmartDocumentFactory: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            if (templates.length > 0) handleSelectTemplate(templates[0]);
-          }}
-          className="px-5 py-3 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-2xl flex items-center gap-2 shadow-xs transition cursor-pointer shrink-0"
-        >
-          <Sparkles className="w-4 h-4" /> Buat Dokumen Otomatis
-        </button>
+        {canCreate && (
+          <button
+            onClick={() => {
+              if (templates.length > 0) handleSelectTemplate(templates[0]);
+            }}
+            className="px-5 py-3 bg-emerald-800 hover:bg-emerald-900 text-white font-bold text-xs rounded-2xl flex items-center gap-2 shadow-xs transition cursor-pointer shrink-0"
+          >
+            <Sparkles className="w-4 h-4" /> Buat Dokumen Otomatis
+          </button>
+        )}
       </div>
 
       {/* In-App Feedback Banner (Non-blocking, replaces alert) */}
@@ -508,7 +654,7 @@ export const R16SmartDocumentFactory: React.FC = () => {
       {!canApprove && activeTab === 'approvals' && (
         <div className="bg-amber-50 border border-amber-200 text-amber-900 p-3.5 rounded-2xl text-xs flex items-center gap-2 font-medium">
           <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-          Akses Terbatas: Role aktif Anda ({effectiveRole || 'Belum Ditetapkan'}) dapat memantau status pengajuan, namun otorisasi persetujuan dokumen resmi dikhususkan untuk KEPALA_SEKOLAH dan SUPER_ADMIN.
+          Akses Terbatas: Role aktif Anda ({verifiedActiveRole || 'Belum Ditetapkan'}) dapat memantau status pengajuan, namun otorisasi persetujuan dokumen resmi dikhususkan untuk KEPALA_SEKOLAH dan SUPER_ADMIN.
         </div>
       )}
 
@@ -592,12 +738,18 @@ export const R16SmartDocumentFactory: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => handleSelectTemplate(tpl)}
-                className="w-full py-2.5 bg-emerald-800 hover:bg-emerald-900 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs mt-3"
-              >
-                <Sparkles className="w-3.5 h-3.5" /> Gunakan Template Ini
-              </button>
+              {canCreate ? (
+                <button
+                  onClick={() => handleSelectTemplate(tpl)}
+                  className="w-full py-2.5 bg-emerald-800 hover:bg-emerald-900 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs mt-3"
+                >
+                  <Sparkles className="w-3.5 h-3.5" /> Gunakan Template Ini
+                </button>
+              ) : (
+                <div className="w-full py-2.5 bg-stone-100 text-stone-400 rounded-xl text-xs font-medium text-center mt-3">
+                  Akses Read-Only
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -687,7 +839,7 @@ export const R16SmartDocumentFactory: React.FC = () => {
                         </button>
                       )}
 
-                      {docItem.status !== 'archived' && (
+                      {canArchive && docItem.status !== 'archived' && (
                         <button
                           disabled={isProcessingThis || isArchivingThis}
                           onClick={() => handleArchive(docItem)}
