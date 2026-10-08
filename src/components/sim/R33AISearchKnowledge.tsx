@@ -28,13 +28,42 @@ import {
   ArrowRight
 } from 'lucide-react';
 
+const CANONICAL_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'WALI_MURID',
+  'KEUANGAN',
+  'KETUA_YAYASAN',
+  'CALON_WALI_MURID',
+  'ALUMNI_FAMILY',
+] as const;
+
 export const R33AISearchKnowledge: React.FC = () => {
-  const { currentUser, userProfile } = useAuth();
+  const { currentUser, userProfile, activeRole } = useAuth();
   const searchInputId = useId();
   const indexTitleId = useId();
   const indexCatId = useId();
   const indexDescId = useId();
   const indexKeywordsId = useId();
+
+  // Authoritative Fail-Closed Active Role Determination
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER overrides activeRole, and no raw fallback exists.
+  const verifiedActiveRole: UserRole | null = (
+    currentUser?.uid &&
+    activeRole &&
+    CANONICAL_ROLES.includes(activeRole)
+  ) ? activeRole : null;
+
+  // Authentic Actor Name Resolution (No synthetic actor fallback)
+  const actorDisplayName =
+    currentUser?.displayName ||
+    userProfile?.nama ||
+    userProfile?.name ||
+    currentUser?.email ||
+    (currentUser?.uid ? `User (${currentUser.uid.slice(0, 8)})` : 'Pengguna SIM');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<KnowledgeIndexItem[]>([]);
@@ -65,17 +94,26 @@ export const R33AISearchKnowledge: React.FC = () => {
     actionableSteps: string[];
   } | null>(null);
 
-  // Role permissions
-  const activeRole: UserRole = userProfile?.role || 'CALON_WALI_MURID';
-  const canIndexKnowledge = ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU', 'KETUA_YAYASAN'].includes(activeRole);
-  const canAccessAdminAssistant = ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'KEUANGAN', 'GURU', 'KETUA_YAYASAN'].includes(activeRole);
+  // Role permissions strictly gated by verifiedActiveRole
+  const canIndexKnowledge = Boolean(
+    verifiedActiveRole &&
+    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'GURU', 'KETUA_YAYASAN'].includes(verifiedActiveRole)
+  );
+  const canAccessAdminAssistant = Boolean(
+    verifiedActiveRole &&
+    ['SUPER_ADMIN', 'ADMIN', 'KEPALA_SEKOLAH', 'KEUANGAN', 'GURU', 'KETUA_YAYASAN'].includes(verifiedActiveRole)
+  );
 
-  useEffect(() => {
-    // Initial auto search for general information
-    handleSearch('sekolah');
-  }, [currentUser?.uid, activeRole]);
+  const handleSearchInternal = async (queryToRun?: string, isMountedRef?: { current: boolean }) => {
+    // Hard pre-query authorization gate
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setSearchResults([]);
+      setKnowledgeSummary(null);
+      setAdminAnswer(null);
+      setLoading(false);
+      return;
+    }
 
-  const handleSearch = async (queryToRun?: string) => {
     const q = (queryToRun !== undefined ? queryToRun : searchQuery).trim();
     setLoading(true);
     setAdminAnswer(null);
@@ -85,25 +123,34 @@ export const R33AISearchKnowledge: React.FC = () => {
       const adminKeywords = ['backup', 'arsip', 'belum diarsipkan', 'ppdb', 'verifikasi', 'pembayaran', 'pending', 'ganda', 'duplikat', 'konflik', 'qr', 'rusak', 'gagal'];
       const isAdminQuestion = adminKeywords.some(k => q.toLowerCase().includes(k)) && canAccessAdminAssistant;
 
-      if (isAdminQuestion) {
+      if (isAdminQuestion && canAccessAdminAssistant) {
         const ans = await DataService.answerAdminAssistantQuery(q);
-        setAdminAnswer(ans);
+        if (!isMountedRef || isMountedRef.current) {
+          setAdminAnswer(ans);
+        }
+      } else {
+        if (!isMountedRef || isMountedRef.current) {
+          setAdminAnswer(null);
+        }
       }
 
       const results = await DataService.searchKnowledge(
         q,
-        activeRole,
-        currentUser?.uid
+        verifiedActiveRole,
+        currentUser.uid
       );
-      setSearchResults(results);
+      if (isMountedRef && !isMountedRef.current) return;
+      setSearchResults(results || []);
 
       const summary = await DataService.buildKnowledgeSummary(
         q || 'sekolah',
-        activeRole,
-        currentUser?.uid
+        verifiedActiveRole,
+        currentUser.uid
       );
+      if (isMountedRef && !isMountedRef.current) return;
       setKnowledgeSummary(summary);
     } catch (err: any) {
+      if (isMountedRef && !isMountedRef.current) return;
       console.error('Search error', err);
       setNotification({
         type: 'error',
@@ -111,12 +158,52 @@ export const R33AISearchKnowledge: React.FC = () => {
         message: err?.message || 'Terjadi kesalahan saat memproses pencarian basis pengetahuan.'
       });
     } finally {
-      setLoading(false);
+      if (!isMountedRef || isMountedRef.current) {
+        setLoading(false);
+      }
     }
   };
 
+  const handleSearch = (queryToRun?: string) => {
+    return handleSearchInternal(queryToRun);
+  };
+
+  useEffect(() => {
+    const isCurrent = { current: true };
+
+    // Pre-query authorization gate on mount
+    if (!currentUser?.uid || !verifiedActiveRole) {
+      setSearchResults([]);
+      setKnowledgeSummary(null);
+      setAdminAnswer(null);
+      setLoading(false);
+      return () => {
+        isCurrent.current = false;
+      };
+    }
+
+    // Initial auto search for general information (strictly authenticated)
+    handleSearchInternal('sekolah', isCurrent);
+
+    return () => {
+      isCurrent.current = false;
+    };
+  }, [currentUser?.uid, verifiedActiveRole]);
+
   const handleAddIndexSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (indexing) return;
+
+    // Hard handler-level authorization guard
+    if (!currentUser?.uid || !verifiedActiveRole || !canIndexKnowledge) {
+      setNotification({
+        type: 'error',
+        title: 'Akses Ditolak',
+        message: 'Otorisasi tidak valid: Hanya peran staf/manajemen yang memiliki izin mengindeks pengetahuan.'
+      });
+      return;
+    }
+
     if (!newTitle.trim()) {
       setNotification({
         type: 'error',
@@ -136,14 +223,14 @@ export const R33AISearchKnowledge: React.FC = () => {
         keywords: kwList,
         sourceType: 'digital_archives',
         module: 'AI Search & Knowledge Engine',
-        ownerId: currentUser?.uid || 'SYSTEM',
+        ownerId: currentUser.uid,
         accessRoles: ['SUPER_ADMIN', 'KEPALA_SEKOLAH', 'GURU', 'KEUANGAN', 'WALI_MURID']
       });
 
-      // Audit trail
+      // Authentic audit trail (No synthetic 'Petugas')
       await DataService.logAction(
-        userProfile?.nama || userProfile?.name || 'Petugas',
-        activeRole,
+        actorDisplayName,
+        verifiedActiveRole,
         'INDEX_KNOWLEDGE_CREATED',
         `R33_KNOWLEDGE: Menambah indeks "${newTitle.trim()}" (${newCategory})`
       );
@@ -188,6 +275,33 @@ export const R33AISearchKnowledge: React.FC = () => {
         return <Database className="w-4 h-4 text-stone-600" />;
     }
   };
+
+  // Fail-Closed Access Boundary
+  if (!currentUser?.uid || !verifiedActiveRole) {
+    return (
+      <div className="space-y-6" id="r33-access-denied-container">
+        <div className="bg-white rounded-3xl p-8 border border-stone-200 shadow-xs text-center max-w-xl mx-auto my-12 space-y-4">
+          <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center mx-auto border border-rose-200">
+            <Lock className="w-8 h-8" />
+          </div>
+          <h2 className="text-xl font-bold text-slate-900">Akses Ditolak — Sesi Tidak Terverifikasi</h2>
+          <p className="text-xs text-stone-600 leading-relaxed">
+            Modul R33 AI Search & Knowledge Engine membutuhkan sesi terautentikasi dengan otoritas peran kanonik yang sah. Identitas atau sesi Anda belum terdaftar pada sistem keamanan SIM.
+          </p>
+          <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 text-xs font-mono text-stone-600">
+            Status: <strong className="text-rose-600">UNAUTHENTICATED / GUEST</strong>
+          </div>
+          <a
+            href="/sim"
+            id="btn-r33-back-sim"
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+          >
+            Kembali ke Dashboard SIM
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" id="r33-ai-search-knowledge-container">
@@ -234,7 +348,7 @@ export const R33AISearchKnowledge: React.FC = () => {
               <Sparkles className="w-3.5 h-3.5" /> TADE AI Search & Knowledge Engine
             </span>
             <span className="text-xs font-bold text-stone-600 bg-stone-100 px-2.5 py-1 rounded-full flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> RBAC Terverifikasi ({activeRole})
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> RBAC Terverifikasi ({verifiedActiveRole})
             </span>
           </div>
 
@@ -416,7 +530,7 @@ export const R33AISearchKnowledge: React.FC = () => {
             <span>Ditemukan <strong className="text-white">{knowledgeSummary.totalResults}</strong> entitas terverifikasi.</span>
             <div className="flex items-center gap-1">
               <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Diakses secara aman oleh peranan: <strong className="text-emerald-300 uppercase">{activeRole}</strong></span>
+              <span>Diakses secara aman oleh peranan: <strong className="text-emerald-300 uppercase">{verifiedActiveRole}</strong></span>
             </div>
           </div>
         </motion.div>
@@ -455,7 +569,7 @@ export const R33AISearchKnowledge: React.FC = () => {
             </div>
             <h3 className="text-sm font-bold text-slate-800">Tidak Ada Hasil Ditemukan</h3>
             <p className="text-xs text-stone-500 max-w-md mx-auto">
-              Tidak ditemukan data yang sesuai dengan kata kunci "{searchQuery}" dan hak akses peran Anda ({activeRole}). Silakan coba kata kunci lain seperti "profil", "guru", "jadwal", atau "surat".
+              Tidak ditemukan data yang sesuai dengan kata kunci "{searchQuery}" dan hak akses peran Anda ({verifiedActiveRole}). Silakan coba kata kunci lain seperti "profil", "guru", "jadwal", atau "surat".
             </p>
           </div>
         ) : (
