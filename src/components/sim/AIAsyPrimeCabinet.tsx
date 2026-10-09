@@ -31,6 +31,26 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { UserRole } from '../../types';
+import { DataService } from '../../services/db';
+
+const CANONICAL_ROLES: readonly string[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH',
+  'GURU',
+  'KEUANGAN',
+  'WALI_MURID',
+  'CALON_WALI_MURID',
+  'TAMU'
+];
+
+const CABINET_AUTHORITY_ROLES: readonly UserRole[] = [
+  'SUPER_ADMIN',
+  'ADMIN',
+  'KETUA_YAYASAN',
+  'KEPALA_SEKOLAH'
+];
 
 export interface AIMinisterProfile {
   id: string;
@@ -68,9 +88,27 @@ export interface PendingDecisionItem {
 }
 
 export const AIAsyPrimeCabinet: React.FC = () => {
-  const { userProfile, activeRole } = useAuth();
-  const currentRole: UserRole = activeRole || userProfile?.role || 'CALON_WALI_MURID';
-  const isSuperAdmin = currentRole === 'SUPER_ADMIN';
+  const { currentUser, userProfile, activeRole } = useAuth();
+
+  // Canonical Identity & RBAC Resolution (Fail Closed)
+  // 1. Authoritative Fail-Closed Active Role Determination
+  // Default Deny: If unauthenticated, missing role, or non-canonical role -> evaluates strictly to null.
+  // CRITICAL: userProfile.role NEVER substitutes activeRole.
+  const verifiedActiveRole: UserRole | null =
+    currentUser?.uid && activeRole && CANONICAL_ROLES.includes(activeRole)
+      ? (activeRole as UserRole)
+      : null;
+
+  // 2. Executive Access Boundary: Only Super Admin, Admin, Ketua Yayasan, and Kepala Sekolah
+  const hasCabinetAuthority = Boolean(
+    verifiedActiveRole && CABINET_AUTHORITY_ROLES.includes(verifiedActiveRole)
+  );
+
+  const isSuperAdmin = verifiedActiveRole === 'SUPER_ADMIN';
+
+  // State for mutation lock & feedback
+  const [processingDecisionId, setProcessingDecisionId] = useState<string | null>(null);
+  const [feedbackMessage, setFeedbackMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Active View Tab: Briefing, Ministers, Presidential Meeting, Pending Decisions
   const [activeTab, setActiveTab] = useState<'BRIEFING' | 'MINISTRIES' | 'CABINET_MEETING' | 'DECISIONS'>('BRIEFING');
@@ -349,10 +387,69 @@ export const AIAsyPrimeCabinet: React.FC = () => {
     }
   ]);
 
-  const handleDecisionAction = (id: string, action: 'APPROVE' | 'REJECT') => {
-    setDecisions((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, status: action === 'APPROVE' ? 'APPROVED' : 'REJECTED' } : d))
-    );
+  const handleDecisionAction = async (id: string, action: 'APPROVE' | 'REJECT') => {
+    // 1. Anti double-submit guard
+    if (processingDecisionId) return;
+
+    // 2. Strict Authentication & Role Authority Check (Fail-Closed)
+    if (!currentUser?.uid || !verifiedActiveRole || !isSuperAdmin) {
+      setFeedbackMessage({
+        type: 'error',
+        text: 'Wewenang tidak mencukupi: Hanya Super Admin terverifikasi yang dapat menetapkan keputusan kabinet.'
+      });
+      return;
+    }
+
+    const targetDecision = decisions.find((d) => d.id === id);
+    if (!targetDecision || targetDecision.status !== 'PENDING') {
+      return;
+    }
+
+    // 3. Authentic Actor Identity (No synthetic 'SYSTEM' / 'Petugas' / 'Admin')
+    const actorDisplayName =
+      userProfile?.nama?.trim() ||
+      userProfile?.name?.trim() ||
+      currentUser.displayName?.trim() ||
+      currentUser.email?.trim() ||
+      `Pengguna-${currentUser.uid.substring(0, 6)}`;
+
+    setProcessingDecisionId(id);
+    try {
+      // 4. Update local decision state
+      setDecisions((prev) =>
+        prev.map((d) =>
+          d.id === id
+            ? { ...d, status: action === 'APPROVE' ? 'APPROVED' : 'REJECTED' }
+            : d
+        )
+      );
+
+      // 5. Authentic Audit Trail logging via DataService
+      if (typeof DataService.logAction === 'function') {
+        const actionLabel = action === 'APPROVE' ? 'PENGESAHAN' : 'PENOLAKAN';
+        await DataService.logAction(
+          actorDisplayName,
+          verifiedActiveRole,
+          `CABINET_DECISION_${action}`,
+          `AIAsyPrimeCabinet: ${actionLabel} keputusan ${targetDecision.id} ("${targetDecision.title}") oleh ${actorDisplayName}`
+        ).catch((err) => {
+          console.warn('[AIAsyPrimeCabinet] Audit log error:', err);
+        });
+      }
+
+      setFeedbackMessage({
+        type: 'success',
+        text: `Keputusan ${targetDecision.id} berhasil di-${action === 'APPROVE' ? 'setujui' : 'tolak'}.`
+      });
+    } catch (err) {
+      console.error('[AIAsyPrimeCabinet] Decision mutation error:', err);
+      setFeedbackMessage({
+        type: 'error',
+        text: 'Gagal memproses keputusan kabinet. Terjadi kesalahan pada sistem.'
+      });
+    } finally {
+      setProcessingDecisionId(null);
+    }
   };
 
   // Presidential Cabinet Meeting Steps
@@ -422,6 +519,45 @@ export const AIAsyPrimeCabinet: React.FC = () => {
     return () => clearTimeout(timer);
   }, [meetingRunning, meetingStep, meetingSteps.length]);
 
+  // Fail-Closed Access Boundary
+  if (!currentUser?.uid || !verifiedActiveRole || !hasCabinetAuthority) {
+    return (
+      <div
+        id="ai-asy-prime-access-denied-container"
+        className="min-h-[480px] flex items-center justify-center p-6 bg-stone-50 rounded-3xl border border-stone-200"
+      >
+        <div className="max-w-md w-full bg-white rounded-3xl p-8 border border-stone-200 shadow-sm text-center space-y-4">
+          <div className="w-16 h-16 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto border border-rose-100">
+            <Lock className="w-8 h-8" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold text-stone-900">Akses Kabinet Terbatas</h2>
+            <p className="text-sm text-stone-600 leading-relaxed">
+              Modul Kabinet Presidensial AI Asy Prime berisi informasi tata kelola, intelijen operasional, dan rekomendasi strategis internal sekolah. Akses terbatas khusus untuk jajaran Eksekutif (Super Admin, Admin, Ketua Yayasan, dan Kepala Sekolah).
+            </p>
+          </div>
+          <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 text-xs font-mono text-stone-600">
+            Status:{' '}
+            <strong className="text-rose-600">
+              {!currentUser?.uid
+                ? 'TIDAK TERAUTENTIKASI (SESI TAMU)'
+                : !verifiedActiveRole
+                ? 'ROLE TIDAK VALID'
+                : `ROLE DITOLAK: ${verifiedActiveRole}`}
+            </strong>
+          </div>
+          <a
+            href="/sim"
+            id="btn-ai-asy-prime-back-sim"
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+          >
+            Kembali ke Dashboard SIM
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* RBAC Notice if not Super Admin */}
@@ -429,7 +565,7 @@ export const AIAsyPrimeCabinet: React.FC = () => {
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-3 text-amber-900 text-xs">
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
           <div>
-            <strong>Mode Observasi Terbatas (Role: {currentRole}):</strong> Dashboard Kabinet Presidensial AI Asy Prime hanya mengizinkan persetujuan aksi strategis oleh <strong>Super Admin</strong>.
+            <strong>Mode Observasi Terbatas (Role: {verifiedActiveRole}):</strong> Dashboard Kabinet Presidensial AI Asy Prime hanya mengizinkan persetujuan aksi strategis oleh <strong>Super Admin</strong>.
           </div>
         </div>
       )}
@@ -837,6 +973,24 @@ export const AIAsyPrimeCabinet: React.FC = () => {
       {/* TAB 3: PENDING STRATEGIC DECISIONS (TRIPLE VERIFICATION PROTOCOL) */}
       {activeTab === 'DECISIONS' && (
         <div className="space-y-6">
+          {feedbackMessage && (
+            <div
+              className={`p-4 rounded-2xl flex items-center justify-between text-xs font-medium border ${
+                feedbackMessage.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <span>{feedbackMessage.text}</span>
+              <button
+                onClick={() => setFeedbackMessage(null)}
+                className="text-stone-400 hover:text-stone-600 font-bold ml-2 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3 text-emerald-950 text-xs">
             <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
             <div>
@@ -904,17 +1058,25 @@ export const AIAsyPrimeCabinet: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => handleDecisionAction(item.id, 'REJECT')}
-                        disabled={!isSuperAdmin}
+                        disabled={!isSuperAdmin || processingDecisionId === item.id}
                         className="px-4 py-2 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 text-xs font-bold cursor-pointer disabled:opacity-50 min-h-[44px]"
                       >
-                        Tolak Usulan
+                        {processingDecisionId === item.id ? 'Memproses...' : 'Tolak Usulan'}
                       </button>
                       <button
                         onClick={() => handleDecisionAction(item.id, 'APPROVE')}
-                        disabled={!isSuperAdmin}
+                        disabled={!isSuperAdmin || processingDecisionId === item.id}
                         className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50 min-h-[44px]"
                       >
-                        <Check className="w-4 h-4" /> Setujui & Terapkan (Super Admin)
+                        {processingDecisionId === item.id ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" /> Memproses...
+                          </>
+                        ) : (
+                          <>
+                            <Check className="w-4 h-4" /> Setujui & Terapkan (Super Admin)
+                          </>
+                        )}
                       </button>
                     </div>
                   ) : (
